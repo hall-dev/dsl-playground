@@ -1,0 +1,10 @@
+[workspace]
+members = [
+  "crates/dsl_syntax",
+  "crates/dsl_runtime",
+  "crates/dsl_wasm",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
