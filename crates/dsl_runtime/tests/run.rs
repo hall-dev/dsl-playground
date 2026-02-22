@@ -132,3 +132,74 @@ input.json("rows")
         })])
     );
 }
+
+#[test]
+fn rbac_evaluate_outputs_decisions_and_matches() {
+    let program = r#"
+requests := input.json("requests") |> json;
+
+requests
+  |> rbac.evaluate(
+    principal_bindings="principal_bindings",
+    role_perms="role_perms",
+    resource_ancestors="resource_ancestors"
+  )
+  |> ui.table("decisions");
+"#;
+
+    let fixtures = json!({
+        "principal_bindings": [
+            {"principal": "alice", "role": "reader"},
+            {"principal": "bob", "role": "writer"},
+            {"principal": "carol", "role": "admin"}
+        ],
+        "role_perms": [
+            {"role": "reader", "action": "read", "resource": "folder:engineering"},
+            {"role": "writer", "action": "write", "resource": "doc:eng-plan"},
+            {"role": "admin", "action": "delete", "resource": "folder:root"}
+        ],
+        "resource_ancestors": [
+            {"resource": "doc:eng-plan", "ancestor": "folder:engineering"},
+            {"resource": "folder:engineering", "ancestor": "folder:root"}
+        ],
+        "requests": [
+            {"principal": "alice", "action": "read", "resource": "doc:eng-plan"},
+            {"principal": "alice", "action": "write", "resource": "doc:eng-plan"},
+            {"principal": "bob", "action": "write", "resource": "doc:eng-plan"},
+            {"principal": "carol", "action": "delete", "resource": "doc:eng-plan"},
+            {"principal": "dave", "action": "read", "resource": "doc:eng-plan"}
+        ]
+    });
+
+    let out = run(program, fixtures).expect("rbac example should run");
+    assert_eq!(
+        out.tables.get("decisions"),
+        Some(&vec![
+            json!({
+                "request": {"principal": "alice", "action": "read", "resource": "doc:eng-plan"},
+                "decision": "allow",
+                "matches": [{"role": "reader", "action": "read", "resource": "folder:engineering"}]
+            }),
+            json!({
+                "request": {"principal": "alice", "action": "write", "resource": "doc:eng-plan"},
+                "decision": "deny",
+                "matches": []
+            }),
+            json!({
+                "request": {"principal": "bob", "action": "write", "resource": "doc:eng-plan"},
+                "decision": "allow",
+                "matches": [{"role": "writer", "action": "write", "resource": "doc:eng-plan"}]
+            }),
+            json!({
+                "request": {"principal": "carol", "action": "delete", "resource": "doc:eng-plan"},
+                "decision": "allow",
+                "matches": [{"role": "admin", "action": "delete", "resource": "folder:root"}]
+            }),
+            json!({
+                "request": {"principal": "dave", "action": "read", "resource": "doc:eng-plan"},
+                "decision": "deny",
+                "matches": []
+            })
+        ])
+    );
+}

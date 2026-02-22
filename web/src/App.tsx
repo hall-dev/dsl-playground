@@ -25,6 +25,41 @@ input.json("bs") |> chain |> ui.table("t");`,
     program: `input.json("ss") |> json |> utf8 |> ~utf8 |> ui.table("rt");`,
     fixtures: '{"ss":["hello","world"]}',
   },
+  {
+    name: 'D. RBAC',
+    program: `requests := input.json("requests") |> json;
+
+requests
+  |> rbac.evaluate(
+    principal_bindings="principal_bindings",
+    role_perms="role_perms",
+    resource_ancestors="resource_ancestors"
+  )
+  |> ui.table("decisions");`,
+    fixtures: `{
+  "principal_bindings": [
+    {"principal": "alice", "role": "reader"},
+    {"principal": "bob", "role": "writer"},
+    {"principal": "carol", "role": "admin"}
+  ],
+  "role_perms": [
+    {"role": "reader", "action": "read", "resource": "folder:engineering"},
+    {"role": "writer", "action": "write", "resource": "doc:eng-plan"},
+    {"role": "admin", "action": "delete", "resource": "folder:root"}
+  ],
+  "resource_ancestors": [
+    {"resource": "doc:eng-plan", "ancestor": "folder:engineering"},
+    {"resource": "folder:engineering", "ancestor": "folder:root"}
+  ],
+  "requests": [
+    {"principal": "alice", "action": "read", "resource": "doc:eng-plan"},
+    {"principal": "alice", "action": "write", "resource": "doc:eng-plan"},
+    {"principal": "bob", "action": "write", "resource": "doc:eng-plan"},
+    {"principal": "carol", "action": "delete", "resource": "doc:eng-plan"},
+    {"principal": "dave", "action": "read", "resource": "doc:eng-plan"}
+  ]
+}`,
+  },
 ];
 
 const pretty = (value: string) => {
