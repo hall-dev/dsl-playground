@@ -1,0 +1,8 @@
+[
+  {"id":"01_map_filter","name":"01 Map/Filter (v0 acceptance A)"},
+  {"id":"02_roundtrip_base64","name":"02 Roundtrip base64 (v0 acceptance B)"},
+  {"id":"03_utf8_roundtrip","name":"03 UTF8 roundtrip (v0 acceptance C)"},
+  {"id":"04_trending_hashtags","name":"04 Trending hashtags (windowless)"},
+  {"id":"05_rbac_minimal","name":"05 RBAC minimal (matches-only)"},
+  {"id":"06_stories_tray_snapshot","name":"06 Stories tray snapshot (filter + group-ish)"}
+]
