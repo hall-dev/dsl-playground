@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { loadWasmApi, type RunOutput, type WasmApi } from './wasm';
+import { CodeEditor } from './CodeEditor';
 
 type Example = {
   name: string;
@@ -268,12 +269,7 @@ export function App() {
       </label>
 
       <h2>Program</h2>
-      <textarea
-        value={program}
-        onChange={(e) => setProgram(e.target.value)}
-        rows={8}
-        style={{ width: '100%', fontFamily: 'monospace' }}
-      />
+      <CodeEditor value={program} onChange={setProgram} />
 
       <h2>Fixtures JSON</h2>
       <textarea
