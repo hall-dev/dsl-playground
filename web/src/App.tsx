@@ -35,6 +35,78 @@ const pretty = (value: string) => {
   }
 };
 
+type TableValue = Record<string, unknown[]>;
+
+function parseTablesJson(tablesJson: string): TableValue {
+  try {
+    const parsed = JSON.parse(tablesJson) as unknown;
+    if (parsed && typeof parsed === 'object') {
+      return Object.entries(parsed as Record<string, unknown>).reduce<TableValue>((acc, [name, rows]) => {
+        acc[name] = Array.isArray(rows) ? rows : [];
+        return acc;
+      }, {});
+    }
+  } catch {
+    // Keep fallback below.
+  }
+  return {};
+}
+
+function renderTableRows(name: string, rows: unknown[]) {
+  const allRecords = rows.every((row) => row && typeof row === 'object' && !Array.isArray(row));
+
+  if (!allRecords) {
+    return (
+      <table key={name} border={1} cellPadding={6} style={{ borderCollapse: 'collapse', marginBottom: 12 }}>
+        <thead>
+          <tr>
+            <th>value</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, index) => (
+            <tr key={index}>
+              <td>
+                <code>{JSON.stringify(row)}</code>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    );
+  }
+
+  const columns = Array.from(
+    new Set(rows.flatMap((row) => Object.keys(row as Record<string, unknown>))),
+  ).sort();
+
+  return (
+    <table key={name} border={1} cellPadding={6} style={{ borderCollapse: 'collapse', marginBottom: 12 }}>
+      <thead>
+        <tr>
+          {columns.map((column) => (
+            <th key={column}>{column}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row, index) => {
+          const record = row as Record<string, unknown>;
+          return (
+            <tr key={index}>
+              {columns.map((column) => (
+                <td key={column}>
+                  <code>{JSON.stringify(record[column] ?? null)}</code>
+                </td>
+              ))}
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
 export function App() {
   const [api, setApi] = useState<WasmApi | null>(null);
   const [program, setProgram] = useState(examples[0].program);
@@ -55,6 +127,7 @@ export function App() {
 
   const prettyTables = useMemo(() => pretty(runOutput.tables_json), [runOutput.tables_json]);
   const prettyLogs = useMemo(() => pretty(runOutput.logs_json), [runOutput.logs_json]);
+  const parsedTables = useMemo(() => parseTablesJson(runOutput.tables_json), [runOutput.tables_json]);
 
   return (
     <main style={{ fontFamily: 'sans-serif', padding: 16, maxWidth: 1000, margin: '0 auto' }}>
@@ -115,8 +188,17 @@ export function App() {
       <h2>Explain</h2>
       <pre style={{ background: '#f5f5f5', padding: 12 }}>{runOutput.explain}</pre>
 
-      <h2>Tables JSON</h2>
-      <pre style={{ background: '#f5f5f5', padding: 12 }}>{prettyTables}</pre>
+      <h2>Tables</h2>
+      {Object.keys(parsedTables).length === 0 ? (
+        <pre style={{ background: '#f5f5f5', padding: 12 }}>{prettyTables}</pre>
+      ) : (
+        Object.entries(parsedTables).map(([name, rows]) => (
+          <section key={name} style={{ marginBottom: 12 }}>
+            <h3 style={{ marginBottom: 8 }}>{name}</h3>
+            {renderTableRows(name, rows)}
+          </section>
+        ))
+      )}
 
       <h2>Logs JSON</h2>
       <pre style={{ background: '#f5f5f5', padding: 12 }}>{prettyLogs}</pre>
