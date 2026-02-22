@@ -7,6 +7,7 @@ name = "dsl_runtime"
 version = "0.1.0"
 dependencies = [
  "dsl_syntax",
+ "serde_json",
 ]
 
 [[package]]
@@ -18,4 +19,9 @@ name = "dsl_wasm"
 version = "0.1.0"
 dependencies = [
  "dsl_runtime",
+ "serde_json",
 ]
+
+[[package]]
+name = "serde_json"
+version = "1.0.0"

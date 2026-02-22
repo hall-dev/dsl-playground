@@ -5,3 +5,4 @@ edition = "2021"
 
 [dependencies]
 dsl_syntax = { path = "../dsl_syntax" }
+serde_json = { path = "../serde_json" }

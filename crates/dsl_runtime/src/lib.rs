@@ -1,363 +1,598 @@
-use dsl_syntax::{parse_program, Expr, Program, Stmt};
+use dsl_syntax::{parse_program, CallArg, Expr, Program, Stmt};
+use serde_json::{Map, Value as JsonValue};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone)]
-pub struct RunOutput {
-    pub tables_json: String,
-    pub logs_json: String,
-    pub explain: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-enum J {
+#[derive(Debug, Clone, PartialEq)]
+pub enum Value {
     Null,
     Bool(bool),
-    Num(i64),
-    Str(String),
-    Arr(Vec<J>),
-    Obj(BTreeMap<String, J>),
-}
-
-#[derive(Clone, Debug)]
-enum RuntimeVal {
-    Json(J),
+    I64(i64),
+    String(String),
     Bytes(Vec<u8>),
+    Array(Vec<Value>),
+    Record(BTreeMap<String, Value>),
     Unit,
 }
-#[derive(Clone, Debug)]
-enum BindingVal {
-    Stream(Vec<RuntimeVal>),
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Stream {
+    values: Vec<Value>,
+}
+
+impl Stream {
+    fn new(values: Vec<Value>) -> Self {
+        Self { values }
+    }
+}
+
+impl IntoIterator for Stream {
+    type Item = Value;
+    type IntoIter = std::vec::IntoIter<Value>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.into_iter()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Outputs {
+    pub tables: BTreeMap<String, Vec<JsonValue>>,
+    pub logs: BTreeMap<String, Vec<String>>,
+    pub explain: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+enum Binding {
+    Stream(Stream),
     Stage(Stage),
 }
-#[derive(Clone, Debug)]
+
+#[derive(Debug, Clone)]
 enum Stage {
-    Map(String),
-    Filter(String),
-    FlatMap(String),
-    Json { inv: bool },
-    Utf8 { inv: bool },
-    Base64 { inv: bool },
+    Map(Expr),
+    Filter(Expr),
+    FlatMap(Expr),
+    Json(Direction),
+    Utf8(Direction),
+    Base64(Direction),
     UiTable(String),
     UiLog(String),
-    Composed(Vec<Stage>),
+    Compose(Vec<Stage>),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Direction {
+    Auto,
+    Inverse,
 }
 
 pub fn compile(program: &str) -> Result<Program, String> {
     parse_program(program).map_err(|e| e.to_string())
 }
 
-pub fn run(program: &str, fixtures_json: &str) -> Result<RunOutput, String> {
+pub fn run(program: &str, fixtures: JsonValue) -> Result<Outputs, String> {
     let program = compile(program)?;
-    let fixtures = parse_fixtures(fixtures_json)?;
-    let mut env: BTreeMap<String, BindingVal> = BTreeMap::new();
-    let mut tables: BTreeMap<String, Vec<J>> = BTreeMap::new();
-    let mut logs: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut explain = vec![];
+    let fixture_map = parse_fixtures(fixtures)?;
+    let mut env: BTreeMap<String, Binding> = BTreeMap::new();
+    let mut outputs = Outputs::default();
 
     for stmt in &program.statements {
         match stmt {
-            Stmt::Binding { name, expr } => {
-                explain.push(format!("binding {name}"));
-                let v = eval_expr(expr, &env, &fixtures, &mut tables, &mut logs, &mut explain)?;
-                env.insert(name.clone(), v);
+            Stmt::Binding { name, expr, .. } => {
+                outputs.explain.push(format!("binding {name}"));
+                let val = eval_expr(expr, &env, &fixture_map, &mut outputs)?;
+                env.insert(name.clone(), val);
             }
-            Stmt::Pipeline { expr } => {
-                explain.push("pipeline".to_string());
-                let _ = eval_expr(expr, &env, &fixtures, &mut tables, &mut logs, &mut explain)?;
+            Stmt::Pipeline { expr, .. } => {
+                outputs.explain.push("pipeline".to_string());
+                let _ = expect_stream(eval_expr(expr, &env, &fixture_map, &mut outputs)?)?;
             }
         }
     }
 
-    Ok(RunOutput {
-        tables_json: stringify_tables(&tables),
-        logs_json: stringify_logs(&logs),
-        explain: explain.join("\n"),
-    })
+    Ok(outputs)
 }
 
 fn eval_expr(
     expr: &Expr,
-    env: &BTreeMap<String, BindingVal>,
-    fixtures: &BTreeMap<String, Vec<J>>,
-    tables: &mut BTreeMap<String, Vec<J>>,
-    logs: &mut BTreeMap<String, Vec<String>>,
-    explain: &mut Vec<String>,
-) -> Result<BindingVal, String> {
+    env: &BTreeMap<String, Binding>,
+    fixtures: &BTreeMap<String, Vec<JsonValue>>,
+    outputs: &mut Outputs,
+) -> Result<Binding, String> {
     match expr {
-        Expr::Pipeline { input, stages } => {
-            let mut stream =
-                expect_stream(eval_expr(input, env, fixtures, tables, logs, explain)?)?;
-            for s in stages {
-                stream = apply_stage(
-                    &expect_stage(eval_expr(s, env, fixtures, tables, logs, explain)?)?,
-                    stream,
-                    tables,
-                    logs,
-                    explain,
-                )?;
+        Expr::Pipeline { input, stages, .. } => {
+            let mut stream = expect_stream(eval_expr(input, env, fixtures, outputs)?)?;
+            for stage_expr in stages {
+                let stage = expect_stage(eval_expr(stage_expr, env, fixtures, outputs)?)?;
+                stream = apply_stage(&stage, stream, outputs)?;
             }
-            Ok(BindingVal::Stream(stream))
+            Ok(Binding::Stream(stream))
         }
-        Expr::Call { name, args } if name == "input.json" => {
-            let fixture_name = if let Expr::String(s) = &args[0] {
-                s.clone()
-            } else {
-                return Err("input.json expects string".to_string());
-            };
-            explain.push(format!("  [source] input.json({fixture_name})"));
-            let fixture = fixtures
-                .get(&fixture_name)
-                .ok_or_else(|| format!("missing fixture: {fixture_name}"))?;
-            Ok(BindingVal::Stream(
-                fixture
-                    .iter()
-                    .cloned()
-                    .map(|j| RuntimeVal::Bytes(stringify_json(&j).into_bytes()))
-                    .collect(),
-            ))
+        Expr::Call { callee, args, .. } => {
+            let name = callee_name(callee).ok_or_else(|| "unsupported callee".to_string())?;
+            match name.as_str() {
+                "input.json" => {
+                    let fixture_name = expect_string(positional_arg(args, 0)?)?;
+                    outputs
+                        .explain
+                        .push(format!("  [source] input.json({fixture_name})"));
+                    let items = fixtures
+                        .get(&fixture_name)
+                        .ok_or_else(|| format!("missing fixture: {fixture_name}"))?;
+                    let values = items
+                        .iter()
+                        .map(|item| {
+                            serde_json::to_vec(item)
+                                .map(Value::Bytes)
+                                .map_err(|e| e.to_string())
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(Binding::Stream(Stream::new(values)))
+                }
+                "map" => Ok(Binding::Stage(Stage::Map(positional_arg(args, 0)?.clone()))),
+                "filter" => Ok(Binding::Stage(Stage::Filter(positional_arg(args, 0)?.clone()))),
+                "flat_map" => Ok(Binding::Stage(Stage::FlatMap(positional_arg(args, 0)?.clone()))),
+                "ui.table" => Ok(Binding::Stage(Stage::UiTable(expect_string(positional_arg(
+                    args, 0,
+                )?)?))),
+                "ui.log" => Ok(Binding::Stage(Stage::UiLog(expect_string(positional_arg(
+                    args, 0,
+                )?)?))),
+                _ => Err(format!("unsupported call: {name}")),
+            }
         }
-        Expr::Call { name, args } if name == "map" => {
-            Ok(BindingVal::Stage(Stage::Map(render_arg(args)?)))
+        Expr::Ident { name, .. } if name == "json" => Ok(Binding::Stage(Stage::Json(Direction::Auto))),
+        Expr::Ident { name, .. } if name == "utf8" => Ok(Binding::Stage(Stage::Utf8(Direction::Auto))),
+        Expr::Ident { name, .. } if name == "base64" => {
+            Ok(Binding::Stage(Stage::Base64(Direction::Auto)))
         }
-        Expr::Call { name, args } if name == "filter" => {
-            Ok(BindingVal::Stage(Stage::Filter(render_arg(args)?)))
-        }
-        Expr::Call { name, args } if name == "flat_map" => {
-            Ok(BindingVal::Stage(Stage::FlatMap(render_arg(args)?)))
-        }
-        Expr::Call { name, args } if name == "ui.table" => {
-            Ok(BindingVal::Stage(Stage::UiTable(expect_str(&args[0])?)))
-        }
-        Expr::Call { name, args } if name == "ui.log" => {
-            Ok(BindingVal::Stage(Stage::UiLog(expect_str(&args[0])?)))
-        }
-        Expr::Ident(name) if name == "json" => Ok(BindingVal::Stage(Stage::Json { inv: false })),
-        Expr::Ident(name) if name == "utf8" => Ok(BindingVal::Stage(Stage::Utf8 { inv: false })),
-        Expr::Ident(name) if name == "base64" => {
-            Ok(BindingVal::Stage(Stage::Base64 { inv: false }))
-        }
-        Expr::Ident(name) => env
+        Expr::Ident { name, .. } => env
             .get(name)
             .cloned()
             .ok_or_else(|| format!("unknown ident {name}")),
-        Expr::Compose { left, right } => Ok(BindingVal::Stage(Stage::Composed(vec![
-            expect_stage(eval_expr(left, env, fixtures, tables, logs, explain)?)?,
-            expect_stage(eval_expr(right, env, fixtures, tables, logs, explain)?)?,
+        Expr::Compose { left, right, .. } => Ok(Binding::Stage(Stage::Compose(vec![
+            expect_stage(eval_expr(left, env, fixtures, outputs)?)?,
+            expect_stage(eval_expr(right, env, fixtures, outputs)?)?,
         ]))),
-        Expr::Inverse(inner) => Ok(BindingVal::Stage(invert(expect_stage(eval_expr(
-            inner, env, fixtures, tables, logs, explain,
+        Expr::Inverse { expr, .. } => Ok(Binding::Stage(invert_stage(expect_stage(eval_expr(
+            expr, env, fixtures, outputs,
         )?)?)?)),
-        _ => Err("unsupported expression".to_string()),
+        _ => Err("unsupported expression for stream/stage evaluation".to_string()),
     }
 }
 
-fn apply_stage(
-    stage: &Stage,
-    stream: Vec<RuntimeVal>,
-    tables: &mut BTreeMap<String, Vec<J>>,
-    logs: &mut BTreeMap<String, Vec<String>>,
-    explain: &mut Vec<String>,
-) -> Result<Vec<RuntimeVal>, String> {
+fn apply_stage(stage: &Stage, stream: Stream, outputs: &mut Outputs) -> Result<Stream, String> {
     match stage {
         Stage::Map(expr) => {
-            explain.push(format!("  [pure] map({expr})"));
-            stream.into_iter().map(|v| eval_map(expr, v)).collect()
+            outputs.explain.push("  [pure] map".to_string());
+            let out = stream
+                .into_iter()
+                .map(|item| eval_value_expr(expr, Some(&item)))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Stream::new(out))
         }
         Stage::Filter(expr) => {
-            explain.push(format!("  [pure] filter({expr})"));
-            let mut o = vec![];
-            for v in stream {
-                if eval_pred(expr, &v)? {
-                    o.push(v);
+            outputs.explain.push("  [pure] filter".to_string());
+            let mut out = Vec::new();
+            for item in stream {
+                if truthy(&eval_value_expr(expr, Some(&item))?)? {
+                    out.push(item);
                 }
             }
-            Ok(o)
+            Ok(Stream::new(out))
         }
         Stage::FlatMap(expr) => {
-            explain.push(format!("  [pure] flat_map({expr})"));
-            let mut out = vec![];
-            for v in stream {
-                if let RuntimeVal::Json(J::Arr(xs)) = eval_map(expr, v)? {
-                    out.extend(xs.into_iter().map(RuntimeVal::Json));
-                } else {
-                    return Err("flat_map must return array".to_string());
+            outputs.explain.push("  [pure] flat_map".to_string());
+            let mut out = Vec::new();
+            for item in stream {
+                match eval_value_expr(expr, Some(&item))? {
+                    Value::Array(values) => out.extend(values),
+                    _ => return Err("flat_map expression must return Array".to_string()),
                 }
             }
-            Ok(out)
+            Ok(Stream::new(out))
         }
-        Stage::Json { inv } => {
-            explain.push("  [reversible] json".to_string());
-            if *inv {
-                stream
-                    .into_iter()
-                    .map(|v| match v {
-                        RuntimeVal::Bytes(b) => Ok(RuntimeVal::Json(parse_json(
-                            &String::from_utf8(b).map_err(|_| "invalid utf8".to_string())?,
-                        )?)),
-                        _ => Err("json inverse expects bytes".to_string()),
-                    })
-                    .collect()
-            } else {
-                stream
-                    .into_iter()
-                    .map(|v| match v {
-                        RuntimeVal::Json(j) => {
-                            Ok(RuntimeVal::Bytes(stringify_json(&j).into_bytes()))
-                        }
-                        _ => Err("json forward expects json".to_string()),
-                    })
-                    .collect()
-            }
+        Stage::Json(direction) => {
+            outputs.explain.push("  [reversible] json".to_string());
+            apply_reversible(stream, *direction, json_forward, json_inverse, accepts_json_forward, accepts_json_inverse)
         }
-        Stage::Utf8 { inv } => {
-            explain.push("  [reversible] utf8".to_string());
-            if *inv {
-                stream
-                    .into_iter()
-                    .map(|v| match v {
-                        RuntimeVal::Bytes(b) => Ok(RuntimeVal::Json(J::Str(
-                            String::from_utf8(b).map_err(|_| "invalid utf8".to_string())?,
-                        ))),
-                        _ => Err("utf8 inverse expects bytes".to_string()),
-                    })
-                    .collect()
-            } else {
-                stream
-                    .into_iter()
-                    .map(|v| match v {
-                        RuntimeVal::Json(J::Str(s)) => Ok(RuntimeVal::Bytes(s.into_bytes())),
-                        _ => Err("utf8 forward expects string".to_string()),
-                    })
-                    .collect()
-            }
+        Stage::Utf8(direction) => {
+            outputs.explain.push("  [reversible] utf8".to_string());
+            apply_reversible(stream, *direction, utf8_forward, utf8_inverse, accepts_utf8_forward, accepts_utf8_inverse)
         }
-        Stage::Base64 { inv } => {
-            explain.push("  [reversible] base64".to_string());
-            if *inv {
-                stream
-                    .into_iter()
-                    .map(|v| match v {
-                        RuntimeVal::Json(J::Str(s)) => Ok(RuntimeVal::Bytes(base64_decode(&s)?)),
-                        _ => Err("base64 inverse expects string".to_string()),
-                    })
-                    .collect()
-            } else {
-                stream
-                    .into_iter()
-                    .map(|v| match v {
-                        RuntimeVal::Bytes(b) => Ok(RuntimeVal::Json(J::Str(base64_encode(&b)))),
-                        _ => Err("base64 forward expects bytes".to_string()),
-                    })
-                    .collect()
-            }
+        Stage::Base64(direction) => {
+            outputs.explain.push("  [reversible] base64".to_string());
+            apply_reversible(stream, *direction, base64_forward, base64_inverse, accepts_base64_forward, accepts_base64_inverse)
         }
         Stage::UiTable(name) => {
-            explain.push(format!("  [sink] ui.table({name})"));
-            let t = tables.entry(name.clone()).or_default();
-            for v in stream {
-                t.push(as_json(v)?);
+            outputs.explain.push(format!("  [sink] ui.table({name})"));
+            let table = outputs.tables.entry(name.clone()).or_default();
+            for item in stream {
+                table.push(value_to_json(item));
             }
-            Ok(vec![RuntimeVal::Unit])
+            Ok(Stream::new(vec![Value::Unit]))
         }
         Stage::UiLog(name) => {
-            explain.push(format!("  [sink] ui.log({name})"));
-            let l = logs.entry(name.clone()).or_default();
-            for v in stream {
-                l.push(stringify_json(&as_json(v)?));
+            outputs.explain.push(format!("  [sink] ui.log({name})"));
+            let log = outputs.logs.entry(name.clone()).or_default();
+            for item in stream {
+                let json = value_to_json(item);
+                log.push(serde_json::to_string(&json).map_err(|e| e.to_string())?);
             }
-            Ok(vec![RuntimeVal::Unit])
+            Ok(Stream::new(vec![Value::Unit]))
         }
-        Stage::Composed(stages) => {
-            let mut cur = stream;
-            for s in stages {
-                cur = apply_stage(s, cur, tables, logs, explain)?;
+        Stage::Compose(stages) => {
+            let mut current = stream;
+            for part in stages {
+                current = apply_stage(part, current, outputs)?;
             }
-            Ok(cur)
+            Ok(current)
         }
     }
 }
 
-fn invert(stage: Stage) -> Result<Stage, String> {
+fn apply_reversible(
+    stream: Stream,
+    direction: Direction,
+    forward: fn(Value) -> Result<Value, String>,
+    inverse: fn(Value) -> Result<Value, String>,
+    forward_accepts: fn(&Value) -> bool,
+    inverse_accepts: fn(&Value) -> bool,
+) -> Result<Stream, String> {
+    let mut out = Vec::new();
+    for value in stream {
+        let next = match direction {
+            Direction::Inverse => inverse(value)?,
+            Direction::Auto => {
+                if forward_accepts(&value) {
+                    forward(value)?
+                } else if inverse_accepts(&value) {
+                    inverse(value)?
+                } else {
+                    return Err("no matching direction for stage".to_string());
+                }
+            }
+        };
+        out.push(next);
+    }
+    Ok(Stream::new(out))
+}
+
+fn invert_stage(stage: Stage) -> Result<Stage, String> {
     Ok(match stage {
-        Stage::Json { inv } => Stage::Json { inv: !inv },
-        Stage::Utf8 { inv } => Stage::Utf8 { inv: !inv },
-        Stage::Base64 { inv } => Stage::Base64 { inv: !inv },
-        Stage::Composed(xs) => Stage::Composed(
-            xs.into_iter()
+        Stage::Json(_) => Stage::Json(Direction::Inverse),
+        Stage::Utf8(_) => Stage::Utf8(Direction::Inverse),
+        Stage::Base64(_) => Stage::Base64(Direction::Inverse),
+        Stage::Compose(stages) => Stage::Compose(
+            stages
+                .into_iter()
                 .rev()
-                .map(invert)
+                .map(invert_stage)
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         _ => return Err("stage is not reversible".to_string()),
     })
 }
-fn expect_stream(v: BindingVal) -> Result<Vec<RuntimeVal>, String> {
-    if let BindingVal::Stream(s) = v {
-        Ok(s)
-    } else {
-        Err("expected stream".to_string())
+
+fn eval_value_expr(expr: &Expr, current: Option<&Value>) -> Result<Value, String> {
+    let mut env = BTreeMap::new();
+    if let Some(v) = current {
+        env.insert("_".to_string(), v.clone());
+    }
+    eval_value_expr_with_env(expr, &env)
+}
+
+fn eval_value_expr_with_env(expr: &Expr, env: &BTreeMap<String, Value>) -> Result<Value, String> {
+    match expr {
+        Expr::Placeholder { .. } => env
+            .get("_")
+            .cloned()
+            .ok_or_else(|| "placeholder _ is not bound".to_string()),
+        Expr::Ident { name, .. } => env
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("unknown identifier {name}")),
+        Expr::Number { value, .. } => Ok(Value::I64(*value)),
+        Expr::String { value, .. } => Ok(Value::String(value.clone())),
+        Expr::Array { items, .. } => {
+            let mut out = Vec::new();
+            for item in items {
+                out.push(eval_value_expr_with_env(item, env)?);
+            }
+            Ok(Value::Array(out))
+        }
+        Expr::Record { fields, .. } => {
+            let mut out = BTreeMap::new();
+            for field in fields {
+                out.insert(field.name.clone(), eval_value_expr_with_env(&field.value, env)?);
+            }
+            Ok(Value::Record(out))
+        }
+        Expr::FieldAccess { expr, field, .. } => match eval_value_expr_with_env(expr, env)? {
+            Value::Record(mut rec) => rec
+                .remove(field)
+                .ok_or_else(|| format!("field not found: {field}")),
+            _ => Err("field access requires a record".to_string()),
+        },
+        Expr::Raw { text, .. } => eval_raw(text, env),
+        Expr::Call { .. } => Err("function calls are not supported inside expressions".to_string()),
+        _ => Err("unsupported expression form".to_string()),
     }
 }
-fn expect_stage(v: BindingVal) -> Result<Stage, String> {
-    if let BindingVal::Stage(s) = v {
-        Ok(s)
-    } else {
-        Err("expected stage".to_string())
+
+fn eval_raw(text: &str, env: &BTreeMap<String, Value>) -> Result<Value, String> {
+    let raw = text.trim();
+    if let Some((l, r)) = split_top_level(raw, '>') {
+        let lhs = eval_raw(l, env)?;
+        let rhs = eval_raw(r, env)?;
+        let (x, y) = match (lhs, rhs) {
+            (Value::I64(x), Value::I64(y)) => (x, y),
+            _ => return Err("operator > expects i64 operands".to_string()),
+        };
+        return Ok(Value::Bool(x > y));
     }
-}
-fn expect_str(e: &Expr) -> Result<String, String> {
-    if let Expr::String(s) = e {
-        Ok(s.clone())
-    } else {
-        Err("expected string".to_string())
+    if let Some((l, r)) = split_top_level(raw, '+') {
+        let lhs = eval_raw(l, env)?;
+        let rhs = eval_raw(r, env)?;
+        return match (lhs, rhs) {
+            (Value::I64(x), Value::I64(y)) => Ok(Value::I64(x + y)),
+            (Value::String(a), Value::String(b)) => Ok(Value::String(format!("{a}{b}"))),
+            _ => Err("operator + expects i64 or string operands".to_string()),
+        };
     }
-}
-fn render_arg(args: &[Expr]) -> Result<String, String> {
-    if args.len() != 1 {
-        return Err("expected one arg".to_string());
-    };
-    Ok(match &args[0] {
-        Expr::Raw(s) | Expr::Ident(s) => s.clone(),
-        Expr::Number(n) => n.to_string(),
-        Expr::String(s) => format!("\"{s}\""),
-        _ => "_".to_string(),
-    })
-}
-fn as_json(v: RuntimeVal) -> Result<J, String> {
-    match v {
-        RuntimeVal::Json(j) => Ok(j),
-        RuntimeVal::Bytes(b) => Ok(J::Arr(b.into_iter().map(|x| J::Num(x as i64)).collect())),
-        RuntimeVal::Unit => Ok(J::Null),
+
+    if raw == "_" {
+        return env
+            .get("_")
+            .cloned()
+            .ok_or_else(|| "placeholder _ is not bound".to_string());
     }
-}
-fn eval_map(expr: &str, v: RuntimeVal) -> Result<RuntimeVal, String> {
-    let j = as_json(v)?;
-    if expr == "_" {
-        return Ok(RuntimeVal::Json(j));
+
+    if let Ok(n) = raw.parse::<i64>() {
+        return Ok(Value::I64(n));
     }
-    if let Some(r) = expr.strip_prefix("_ +") {
-        let n = r
-            .trim()
-            .parse::<i64>()
-            .map_err(|_| "bad number".to_string())?;
-        if let J::Num(x) = j {
-            return Ok(RuntimeVal::Json(J::Num(x + n)));
+
+    if raw.starts_with('"') {
+        return match serde_json::from_str(raw).map_err(|e| e.to_string())? {
+            JsonValue::String(s) => Ok(Value::String(s)),
+            _ => Err("invalid string literal".to_string()),
+        };
+    }
+
+    if raw == "true" {
+        return Ok(Value::Bool(true));
+    }
+    if raw == "false" {
+        return Ok(Value::Bool(false));
+    }
+    if raw == "null" {
+        return Ok(Value::Null);
+    }
+
+    if let Some((root, field)) = raw.rsplit_once('.') {
+        let root_val = eval_raw(root, env)?;
+        return match root_val {
+            Value::Record(mut rec) => rec
+                .remove(field)
+                .ok_or_else(|| format!("field not found: {field}")),
+            _ => Err("field access requires a record".to_string()),
+        };
+    }
+
+    env.get(raw)
+        .cloned()
+        .ok_or_else(|| format!("unknown expression: {raw}"))
+}
+
+fn split_top_level(input: &str, needle: char) -> Option<(&str, &str)> {
+    let mut depth_paren = 0usize;
+    let mut depth_brack = 0usize;
+    let mut depth_brace = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (idx, c) in input.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match c {
+            '"' => in_string = true,
+            '(' => depth_paren += 1,
+            ')' => depth_paren = depth_paren.saturating_sub(1),
+            '[' => depth_brack += 1,
+            ']' => depth_brack = depth_brack.saturating_sub(1),
+            '{' => depth_brace += 1,
+            '}' => depth_brace = depth_brace.saturating_sub(1),
+            _ if c == needle && depth_paren == 0 && depth_brack == 0 && depth_brace == 0 => {
+                let left = input[..idx].trim();
+                let right = input[idx + c.len_utf8()..].trim();
+                if !left.is_empty() && !right.is_empty() {
+                    return Some((left, right));
+                }
+            }
+            _ => {}
         }
     }
-    Err("unsupported map expression in v0".to_string())
+    None
 }
-fn eval_pred(expr: &str, v: &RuntimeVal) -> Result<bool, String> {
-    let j = as_json(v.clone())?;
-    if let Some(r) = expr.strip_prefix("_ >") {
-        let n = r
-            .trim()
-            .parse::<i64>()
-            .map_err(|_| "bad number".to_string())?;
-        if let J::Num(x) = j {
-            return Ok(x > n);
-        }
+
+fn truthy(value: &Value) -> Result<bool, String> {
+    match value {
+        Value::Bool(v) => Ok(*v),
+        _ => Err("filter expression must evaluate to bool".to_string()),
     }
-    Err("unsupported filter expression in v0".to_string())
+}
+
+fn json_forward(value: Value) -> Result<Value, String> {
+    let json = value_to_json(value);
+    serde_json::to_vec(&json)
+        .map(Value::Bytes)
+        .map_err(|e| e.to_string())
+}
+
+fn json_inverse(value: Value) -> Result<Value, String> {
+    match value {
+        Value::Bytes(bytes) => serde_json::from_slice(&bytes)
+            .map(json_to_value)
+            .map_err(|e| e.to_string()),
+        _ => Err("json inverse expects Bytes".to_string()),
+    }
+}
+
+fn utf8_forward(value: Value) -> Result<Value, String> {
+    match value {
+        Value::String(s) => Ok(Value::Bytes(s.into_bytes())),
+        _ => Err("utf8 forward expects String".to_string()),
+    }
+}
+
+fn utf8_inverse(value: Value) -> Result<Value, String> {
+    match value {
+        Value::Bytes(bytes) => String::from_utf8(bytes)
+            .map(Value::String)
+            .map_err(|e| e.to_string()),
+        _ => Err("utf8 inverse expects Bytes".to_string()),
+    }
+}
+
+fn base64_forward(value: Value) -> Result<Value, String> {
+    match value {
+        Value::Bytes(bytes) => Ok(Value::String(base64_encode(&bytes))),
+        _ => Err("base64 forward expects Bytes".to_string()),
+    }
+}
+
+fn base64_inverse(value: Value) -> Result<Value, String> {
+    match value {
+        Value::String(s) => Ok(Value::Bytes(base64_decode(&s)?)),
+        _ => Err("base64 inverse expects String".to_string()),
+    }
+}
+
+fn accepts_json_forward(value: &Value) -> bool {
+    !matches!(value, Value::Bytes(_) | Value::Unit)
+}
+
+fn accepts_json_inverse(value: &Value) -> bool {
+    matches!(value, Value::Bytes(_))
+}
+
+fn accepts_utf8_forward(value: &Value) -> bool {
+    matches!(value, Value::String(_))
+}
+
+fn accepts_utf8_inverse(value: &Value) -> bool {
+    matches!(value, Value::Bytes(_))
+}
+
+fn accepts_base64_forward(value: &Value) -> bool {
+    matches!(value, Value::Bytes(_))
+}
+
+fn accepts_base64_inverse(value: &Value) -> bool {
+    matches!(value, Value::String(_))
+}
+
+fn parse_fixtures(fixtures: JsonValue) -> Result<BTreeMap<String, Vec<JsonValue>>, String> {
+    match fixtures {
+        JsonValue::Object(map) => {
+            let mut out = BTreeMap::new();
+            for (name, value) in map {
+                match value {
+                    JsonValue::Array(items) => {
+                        out.insert(name, items);
+                    }
+                    _ => return Err("fixture values must be arrays".to_string()),
+                }
+            }
+            Ok(out)
+        }
+        _ => Err("fixtures must be an object".to_string()),
+    }
+}
+
+fn callee_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Ident { name, .. } => Some(name.clone()),
+        Expr::FieldAccess { expr, field, .. } => callee_name(expr).map(|base| format!("{base}.{field}")),
+        _ => None,
+    }
+}
+
+fn positional_arg(args: &[CallArg], index: usize) -> Result<&Expr, String> {
+    args.get(index)
+        .ok_or_else(|| "missing positional arg".to_string())
+        .and_then(|arg| match arg {
+            CallArg::Positional(expr) => Ok(expr),
+            CallArg::Named { .. } => Err("named arguments are not supported in v0".to_string()),
+        })
+}
+
+fn expect_string(expr: &Expr) -> Result<String, String> {
+    match expr {
+        Expr::String { value, .. } => Ok(value.clone()),
+        _ => Err("expected string literal".to_string()),
+    }
+}
+
+fn expect_stage(binding: Binding) -> Result<Stage, String> {
+    match binding {
+        Binding::Stage(stage) => Ok(stage),
+        _ => Err("expected stage".to_string()),
+    }
+}
+
+fn expect_stream(binding: Binding) -> Result<Stream, String> {
+    match binding {
+        Binding::Stream(stream) => Ok(stream),
+        _ => Err("expected stream".to_string()),
+    }
+}
+
+fn value_to_json(value: Value) -> JsonValue {
+    match value {
+        Value::Null => JsonValue::Null,
+        Value::Bool(v) => JsonValue::Bool(v),
+        Value::I64(v) => JsonValue::Number(v.into()),
+        Value::String(v) => JsonValue::String(v),
+        Value::Bytes(v) => JsonValue::Array(
+            v.into_iter()
+                .map(|b| JsonValue::Number((b as i64).into()))
+                .collect(),
+        ),
+        Value::Array(items) => JsonValue::Array(items.into_iter().map(value_to_json).collect()),
+        Value::Record(record) => {
+            let mut out = Map::new();
+            for (k, v) in record {
+                out.insert(k, value_to_json(v));
+            }
+            JsonValue::Object(out)
+        }
+        Value::Unit => JsonValue::Null,
+    }
+}
+
+fn json_to_value(value: JsonValue) -> Value {
+    match value {
+        JsonValue::Null => Value::Null,
+        JsonValue::Bool(v) => Value::Bool(v),
+        JsonValue::Number(v) => Value::I64(v.as_i64().unwrap_or_default()),
+        JsonValue::String(v) => Value::String(v),
+        JsonValue::Array(items) => Value::Array(items.into_iter().map(json_to_value).collect()),
+        JsonValue::Object(map) => Value::Record(
+            map.into_iter()
+                .map(|(k, v)| (k, json_to_value(v)))
+                .collect(),
+        ),
+    }
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
@@ -393,6 +628,7 @@ fn base64_encode(bytes: &[u8]) -> String {
     }
     o
 }
+
 fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     fn v(c: u8) -> Option<u8> {
         match c {
@@ -404,260 +640,37 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
             _ => None,
         }
     }
-    let b = s.as_bytes();
-    if b.len() % 4 != 0 {
+
+    let bytes = s.as_bytes();
+    if bytes.len() % 4 != 0 {
         return Err("invalid base64 length".to_string());
     }
-    let mut o = vec![];
+
+    let mut out = Vec::new();
     let mut i = 0;
-    while i < b.len() {
-        let c0 = v(b[i]).ok_or_else(|| "invalid base64".to_string())? as u32;
-        let c1 = v(b[i + 1]).ok_or_else(|| "invalid base64".to_string())? as u32;
-        let c2 = if b[i + 2] == b'=' {
+    while i < bytes.len() {
+        let c0 = v(bytes[i]).ok_or_else(|| "invalid base64".to_string())? as u32;
+        let c1 = v(bytes[i + 1]).ok_or_else(|| "invalid base64".to_string())? as u32;
+        let c2 = if bytes[i + 2] == b'=' {
             64
         } else {
-            v(b[i + 2]).ok_or_else(|| "invalid base64".to_string())? as u32
+            v(bytes[i + 2]).ok_or_else(|| "invalid base64".to_string())? as u32
         };
-        let c3 = if b[i + 3] == b'=' {
+        let c3 = if bytes[i + 3] == b'=' {
             64
         } else {
-            v(b[i + 3]).ok_or_else(|| "invalid base64".to_string())? as u32
+            v(bytes[i + 3]).ok_or_else(|| "invalid base64".to_string())? as u32
         };
+
         let n = (c0 << 18) | (c1 << 12) | ((c2 & 63) << 6) | (c3 & 63);
-        o.push(((n >> 16) & 255) as u8);
+        out.push(((n >> 16) & 255) as u8);
         if c2 != 64 {
-            o.push(((n >> 8) & 255) as u8);
+            out.push(((n >> 8) & 255) as u8);
         }
         if c3 != 64 {
-            o.push((n & 255) as u8);
+            out.push((n & 255) as u8);
         }
         i += 4;
     }
-    Ok(o)
-}
-
-fn parse_fixtures(input: &str) -> Result<BTreeMap<String, Vec<J>>, String> {
-    let j = parse_json(input)?;
-    let mut out = BTreeMap::new();
-    if let J::Obj(m) = j {
-        for (k, v) in m {
-            if let J::Arr(xs) = v {
-                out.insert(k, xs);
-            } else {
-                return Err("fixture values must be arrays".to_string());
-            }
-        }
-        Ok(out)
-    } else {
-        Err("fixtures_json must be object".to_string())
-    }
-}
-fn stringify_tables(t: &BTreeMap<String, Vec<J>>) -> String {
-    let mut m = BTreeMap::new();
-    for (k, v) in t {
-        m.insert(k.clone(), J::Arr(v.clone()));
-    }
-    stringify_json(&J::Obj(m))
-}
-fn stringify_logs(t: &BTreeMap<String, Vec<String>>) -> String {
-    let mut m = BTreeMap::new();
-    for (k, v) in t {
-        m.insert(
-            k.clone(),
-            J::Arr(v.iter().map(|s| J::Str(s.clone())).collect()),
-        );
-    }
-    stringify_json(&J::Obj(m))
-}
-
-fn stringify_json(j: &J) -> String {
-    match j {
-        J::Null => "null".to_string(),
-        J::Bool(b) => b.to_string(),
-        J::Num(n) => n.to_string(),
-        J::Str(s) => format!(
-            "\"{}\"",
-            s.replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace('\n', "\\n")
-        ),
-        J::Arr(a) => format!(
-            "[{}]",
-            a.iter().map(stringify_json).collect::<Vec<_>>().join(",")
-        ),
-        J::Obj(o) => format!(
-            "{{{}}}",
-            o.iter()
-                .map(|(k, v)| format!("\"{}\":{}", k.replace('"', "\\\""), stringify_json(v)))
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-    }
-}
-
-fn parse_json(input: &str) -> Result<J, String> {
-    let mut p = JsonP {
-        b: input.as_bytes(),
-        i: 0,
-    };
-    let v = p.value()?;
-    p.ws();
-    if p.i != p.b.len() {
-        return Err("trailing json".to_string());
-    }
-    Ok(v)
-}
-struct JsonP<'a> {
-    b: &'a [u8],
-    i: usize,
-}
-impl<'a> JsonP<'a> {
-    fn ws(&mut self) {
-        while self.i < self.b.len() && self.b[self.i].is_ascii_whitespace() {
-            self.i += 1;
-        }
-    }
-    fn value(&mut self) -> Result<J, String> {
-        self.ws();
-        if self.i >= self.b.len() {
-            return Err("eof".to_string());
-        }
-        match self.b[self.i] {
-            b'n' => {
-                self.expect(b"null")?;
-                Ok(J::Null)
-            }
-            b't' => {
-                self.expect(b"true")?;
-                Ok(J::Bool(true))
-            }
-            b'f' => {
-                self.expect(b"false")?;
-                Ok(J::Bool(false))
-            }
-            b'"' => Ok(J::Str(self.string()?)),
-            b'[' => self.array(),
-            b'{' => self.object(),
-            b'-' | b'0'..=b'9' => self.number(),
-            _ => Err("bad json value".to_string()),
-        }
-    }
-    fn expect(&mut self, s: &[u8]) -> Result<(), String> {
-        if self.b.get(self.i..self.i + s.len()) == Some(s) {
-            self.i += s.len();
-            Ok(())
-        } else {
-            Err("bad token".to_string())
-        }
-    }
-    fn string(&mut self) -> Result<String, String> {
-        self.i += 1;
-        let mut o = String::new();
-        while self.i < self.b.len() {
-            let c = self.b[self.i];
-            self.i += 1;
-            if c == b'"' {
-                return Ok(o);
-            }
-            if c == b'\\' {
-                if self.i >= self.b.len() {
-                    return Err("bad escape".to_string());
-                }
-                let e = self.b[self.i];
-                self.i += 1;
-                o.push(match e {
-                    b'"' => '"',
-                    b'\\' => '\\',
-                    b'n' => '\n',
-                    b't' => '\t',
-                    _ => return Err("bad escape".to_string()),
-                });
-            } else {
-                o.push(c as char)
-            }
-        }
-        Err("unterminated string".to_string())
-    }
-    fn number(&mut self) -> Result<J, String> {
-        let s = self.i;
-        if self.b[self.i] == b'-' {
-            self.i += 1;
-        }
-        while self.i < self.b.len() && self.b[self.i].is_ascii_digit() {
-            self.i += 1;
-        }
-        let n = std::str::from_utf8(&self.b[s..self.i])
-            .map_err(|_| "utf8".to_string())?
-            .parse::<i64>()
-            .map_err(|_| "num".to_string())?;
-        Ok(J::Num(n))
-    }
-    fn array(&mut self) -> Result<J, String> {
-        self.i += 1;
-        let mut o = vec![];
-        loop {
-            self.ws();
-            if self.i < self.b.len() && self.b[self.i] == b']' {
-                self.i += 1;
-                return Ok(J::Arr(o));
-            }
-            o.push(self.value()?);
-            self.ws();
-            if self.i < self.b.len() && self.b[self.i] == b',' {
-                self.i += 1;
-                continue;
-            }
-            if self.i < self.b.len() && self.b[self.i] == b']' {
-                self.i += 1;
-                return Ok(J::Arr(o));
-            }
-            return Err("bad array".to_string());
-        }
-    }
-    fn object(&mut self) -> Result<J, String> {
-        self.i += 1;
-        let mut o = BTreeMap::new();
-        loop {
-            self.ws();
-            if self.i < self.b.len() && self.b[self.i] == b'}' {
-                self.i += 1;
-                return Ok(J::Obj(o));
-            }
-            let k = self.string()?;
-            self.ws();
-            if self.i >= self.b.len() || self.b[self.i] != b':' {
-                return Err("bad object".to_string());
-            }
-            self.i += 1;
-            let v = self.value()?;
-            o.insert(k, v);
-            self.ws();
-            if self.i < self.b.len() && self.b[self.i] == b',' {
-                self.i += 1;
-                continue;
-            }
-            if self.i < self.b.len() && self.b[self.i] == b'}' {
-                self.i += 1;
-                return Ok(J::Obj(o));
-            }
-            return Err("bad object".to_string());
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn map_filter_program() {
-        let p = "xs := input.json(\"xs\") |> ~json; xs |> map(_ + 1) |> filter(_ > 2) |> ui.table(\"out\");";
-        let out = run(p, "{\"xs\":[1,2,3]}").unwrap();
-        assert_eq!(out.tables_json, "{\"out\":[3,4]}");
-    }
-    #[test]
-    fn utf8_roundtrip() {
-        let p = "input.json(\"ss\") |> ~json |> utf8 |> ~utf8 |> ui.table(\"rt\");";
-        let out = run(p, "{\"ss\":[\"hi\"]}").unwrap();
-        assert_eq!(out.tables_json, "{\"rt\":[\"hi\"]}");
-    }
+    Ok(out)
 }
