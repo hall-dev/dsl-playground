@@ -1,0 +1,56 @@
+.code-editor {
+  position: relative;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.code-editor__highlight,
+.code-editor__input {
+  margin: 0;
+  width: 100%;
+  min-height: 180px;
+  box-sizing: border-box;
+  padding: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  font-size: 14px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.code-editor__highlight {
+  pointer-events: none;
+}
+
+.code-editor__input {
+  position: absolute;
+  inset: 0;
+  resize: vertical;
+  border: 0;
+  background: transparent;
+  color: transparent;
+  caret-color: #111827;
+}
+
+.code-editor__input:focus {
+  outline: 2px solid #93c5fd;
+  outline-offset: -2px;
+}
+
+.tok-keyword {
+  color: #7c3aed;
+  font-weight: 600;
+}
+
+.tok-operator {
+  color: #2563eb;
+}
+
+.tok-string {
+  color: #047857;
+}
+
+.tok-number {
+  color: #b45309;
+}
