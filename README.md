@@ -67,7 +67,14 @@ If you only have a browser (for example, on a Chromebook), use GitHub Codespaces
 
 1. Fork this repository in GitHub.
 2. Click **Code** → **Codespaces** → **Create codespace on main**.
-3. In the Codespaces terminal, run:
+3. In the Codespaces terminal, install Rust/Cargo if needed:
+
+   ```bash
+   command -v cargo || curl https://sh.rustup.rs -sSf | sh -s -- -y
+   source "$HOME/.cargo/env"
+   ```
+
+4. Build the WASM package and start the web app:
 
    ```bash
    cargo install wasm-pack
@@ -77,9 +84,10 @@ If you only have a browser (for example, on a Chromebook), use GitHub Codespaces
    npm run dev
    ```
 
-4. Open the forwarded Vite port (usually `5173`) in your browser.
-5. In the playground, select an example program and click **Run**.
+5. Open the forwarded Vite port (usually `5173`) in your browser.
+6. In the playground, select an example program and click **Run**.
 
 Notes:
+- If `wasm-pack` is already installed, you can skip `cargo install wasm-pack`.
 - If `cargo install wasm-pack` takes too long, you can still open the UI, but execution will show a placeholder until the WASM package is built.
 - Re-run `wasm-pack build ...` whenever you change Rust/WASM code.
