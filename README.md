@@ -60,3 +60,26 @@ Then restart `npm run dev`.
 ## Try examples
 
 In the web app, use the **Example program** dropdown to load runnable demos (including RBAC and v1 preview examples), then click **Run**.
+
+## Browser-only (Chromebook) checklist
+
+If you only have a browser (for example, on a Chromebook), use GitHub Codespaces:
+
+1. Fork this repository in GitHub.
+2. Click **Code** → **Codespaces** → **Create codespace on main**.
+3. In the Codespaces terminal, run:
+
+   ```bash
+   cargo install wasm-pack
+   wasm-pack build crates/dsl_wasm --target web --out-dir crates/dsl_wasm/pkg
+   cd web
+   npm install
+   npm run dev
+   ```
+
+4. Open the forwarded Vite port (usually `5173`) in your browser.
+5. In the playground, select an example program and click **Run**.
+
+Notes:
+- If `cargo install wasm-pack` takes too long, you can still open the UI, but execution will show a placeholder until the WASM package is built.
+- Re-run `wasm-pack build ...` whenever you change Rust/WASM code.
