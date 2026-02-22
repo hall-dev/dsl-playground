@@ -67,27 +67,18 @@ If you only have a browser (for example, on a Chromebook), use GitHub Codespaces
 
 1. Fork this repository in GitHub.
 2. Click **Code** → **Codespaces** → **Create codespace on main**.
-3. In the Codespaces terminal, install Rust/Cargo if needed:
+3. In the Codespaces terminal, run the bootstrap script:
 
    ```bash
-   command -v cargo || curl https://sh.rustup.rs -sSf | sh -s -- -y
-   source "$HOME/.cargo/env"
+   bash scripts/chromebook_codespaces_bootstrap.sh
    ```
 
-4. Build the WASM package and start the web app:
+   The script is robust to missing or preinstalled toolchains: it installs Rust/Cargo only when needed, sources `~/.cargo/env` in the current shell, installs `wasm-pack` only when needed, and starts the web app.
 
-   ```bash
-   cargo install wasm-pack
-   wasm-pack build crates/dsl_wasm --target web --out-dir crates/dsl_wasm/pkg
-   cd web
-   npm install
-   npm run dev
-   ```
-
-5. Open the forwarded Vite port (usually `5173`) in your browser.
-6. In the playground, select an example program and click **Run**.
+4. Open the forwarded Vite port (usually `5173`) in your browser.
+5. In the playground, select an example program and click **Run**.
 
 Notes:
-- If `wasm-pack` is already installed, you can skip `cargo install wasm-pack`.
-- If `cargo install wasm-pack` takes too long, you can still open the UI, but execution will show a placeholder until the WASM package is built.
-- Re-run `wasm-pack build ...` whenever you change Rust/WASM code.
+- If `cargo install wasm-pack` takes too long, you can still open the UI; the script will continue and the playground will show a placeholder when WASM bindings are unavailable.
+- If `crates/dsl_wasm/Cargo.toml` does not include `wasm-bindgen`, the script skips `wasm-pack build` to avoid the common Codespaces error and prints a warning.
+- Re-run the script whenever you change Rust/WASM code.
