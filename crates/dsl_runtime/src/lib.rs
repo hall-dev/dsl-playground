@@ -57,6 +57,11 @@ enum Stage {
         within_ms: i64,
         limit: i64,
     },
+    RbacEvaluate {
+        principal_bindings: String,
+        role_perms: String,
+        resource_ancestors: String,
+    },
     Json(Direction),
     Utf8(Direction),
     Base64(Direction),
@@ -109,7 +114,7 @@ fn eval_expr(
             let mut stream = expect_stream(eval_expr(input, env, fixtures, outputs)?)?;
             for stage_expr in stages {
                 let stage = expect_stage(eval_expr(stage_expr, env, fixtures, outputs)?)?;
-                stream = apply_stage(&stage, stream, outputs)?;
+                stream = apply_stage(&stage, stream, fixtures, outputs)?;
             }
             Ok(Binding::Stream(stream))
         }
@@ -135,24 +140,37 @@ fn eval_expr(
                     Ok(Binding::Stream(Stream::new(values)))
                 }
                 "map" => Ok(Binding::Stage(Stage::Map(positional_arg(args, 0)?.clone()))),
-                "filter" => Ok(Binding::Stage(Stage::Filter(positional_arg(args, 0)?.clone()))),
-                "flat_map" => Ok(Binding::Stage(Stage::FlatMap(positional_arg(args, 0)?.clone()))),
+                "filter" => Ok(Binding::Stage(Stage::Filter(
+                    positional_arg(args, 0)?.clone(),
+                ))),
+                "flat_map" => Ok(Binding::Stage(Stage::FlatMap(
+                    positional_arg(args, 0)?.clone(),
+                ))),
                 "group.collect_all" => Ok(Binding::Stage(Stage::GroupCollectAll {
                     by_key: named_arg(args, "by_key")?.clone(),
                     within_ms: expect_i64_literal(named_arg(args, "within_ms")?)?,
                     limit: expect_i64_literal(named_arg(args, "limit")?)?,
                 })),
-                "ui.table" => Ok(Binding::Stage(Stage::UiTable(expect_string(positional_arg(
-                    args, 0,
-                )?)?))),
-                "ui.log" => Ok(Binding::Stage(Stage::UiLog(expect_string(positional_arg(
-                    args, 0,
-                )?)?))),
+                "rbac.evaluate" => Ok(Binding::Stage(Stage::RbacEvaluate {
+                    principal_bindings: expect_string(named_arg(args, "principal_bindings")?)?,
+                    role_perms: expect_string(named_arg(args, "role_perms")?)?,
+                    resource_ancestors: expect_string(named_arg(args, "resource_ancestors")?)?,
+                })),
+                "ui.table" => Ok(Binding::Stage(Stage::UiTable(expect_string(
+                    positional_arg(args, 0)?,
+                )?))),
+                "ui.log" => Ok(Binding::Stage(Stage::UiLog(expect_string(
+                    positional_arg(args, 0)?,
+                )?))),
                 _ => Err(format!("unsupported call: {name}")),
             }
         }
-        Expr::Ident { name, .. } if name == "json" => Ok(Binding::Stage(Stage::Json(Direction::Auto))),
-        Expr::Ident { name, .. } if name == "utf8" => Ok(Binding::Stage(Stage::Utf8(Direction::Auto))),
+        Expr::Ident { name, .. } if name == "json" => {
+            Ok(Binding::Stage(Stage::Json(Direction::Auto)))
+        }
+        Expr::Ident { name, .. } if name == "utf8" => {
+            Ok(Binding::Stage(Stage::Utf8(Direction::Auto)))
+        }
         Expr::Ident { name, .. } if name == "base64" => {
             Ok(Binding::Stage(Stage::Base64(Direction::Auto)))
         }
@@ -171,7 +189,12 @@ fn eval_expr(
     }
 }
 
-fn apply_stage(stage: &Stage, stream: Stream, outputs: &mut Outputs) -> Result<Stream, String> {
+fn apply_stage(
+    stage: &Stage,
+    stream: Stream,
+    fixtures: &BTreeMap<String, Vec<JsonValue>>,
+    outputs: &mut Outputs,
+) -> Result<Stream, String> {
     match stage {
         Stage::Map(expr) => {
             outputs.explain.push("  [pure] map".to_string());
@@ -242,17 +265,55 @@ fn apply_stage(stage: &Stage, stream: Stream, outputs: &mut Outputs) -> Result<S
                 .collect();
             Ok(Stream::new(out))
         }
+        Stage::RbacEvaluate {
+            principal_bindings,
+            role_perms,
+            resource_ancestors,
+        } => {
+            outputs.explain.push("  [pure] rbac.evaluate".to_string());
+            let bindings = fixtures
+                .get(principal_bindings)
+                .ok_or_else(|| format!("missing fixture: {principal_bindings}"))?;
+            let perms = fixtures
+                .get(role_perms)
+                .ok_or_else(|| format!("missing fixture: {role_perms}"))?;
+            let ancestors = fixtures
+                .get(resource_ancestors)
+                .ok_or_else(|| format!("missing fixture: {resource_ancestors}"))?;
+            eval_rbac(stream, bindings, perms, ancestors)
+        }
         Stage::Json(direction) => {
             outputs.explain.push("  [reversible] json".to_string());
-            apply_reversible(stream, *direction, json_forward, json_inverse, accepts_json_forward, accepts_json_inverse)
+            apply_reversible(
+                stream,
+                *direction,
+                json_forward,
+                json_inverse,
+                accepts_json_forward,
+                accepts_json_inverse,
+            )
         }
         Stage::Utf8(direction) => {
             outputs.explain.push("  [reversible] utf8".to_string());
-            apply_reversible(stream, *direction, utf8_forward, utf8_inverse, accepts_utf8_forward, accepts_utf8_inverse)
+            apply_reversible(
+                stream,
+                *direction,
+                utf8_forward,
+                utf8_inverse,
+                accepts_utf8_forward,
+                accepts_utf8_inverse,
+            )
         }
         Stage::Base64(direction) => {
             outputs.explain.push("  [reversible] base64".to_string());
-            apply_reversible(stream, *direction, base64_forward, base64_inverse, accepts_base64_forward, accepts_base64_inverse)
+            apply_reversible(
+                stream,
+                *direction,
+                base64_forward,
+                base64_inverse,
+                accepts_base64_forward,
+                accepts_base64_inverse,
+            )
         }
         Stage::UiTable(name) => {
             outputs.explain.push(format!("  [sink] ui.table({name})"));
@@ -274,10 +335,111 @@ fn apply_stage(stage: &Stage, stream: Stream, outputs: &mut Outputs) -> Result<S
         Stage::Compose(stages) => {
             let mut current = stream;
             for part in stages {
-                current = apply_stage(part, current, outputs)?;
+                current = apply_stage(part, current, fixtures, outputs)?;
             }
             Ok(current)
         }
+    }
+}
+
+fn eval_rbac(
+    stream: Stream,
+    principal_bindings: &[JsonValue],
+    role_perms: &[JsonValue],
+    resource_ancestors: &[JsonValue],
+) -> Result<Stream, String> {
+    let mut roles_by_principal: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for row in principal_bindings {
+        let principal = expect_json_string_field(row, "principal")?;
+        let role = expect_json_string_field(row, "role")?;
+        roles_by_principal.entry(principal).or_default().push(role);
+    }
+
+    let mut perms_by_role_action: BTreeMap<(String, String), Vec<JsonValue>> = BTreeMap::new();
+    for row in role_perms {
+        let role = expect_json_string_field(row, "role")?;
+        let action = expect_json_string_field(row, "action")?;
+        perms_by_role_action
+            .entry((role, action))
+            .or_default()
+            .push(row.clone());
+    }
+
+    let mut ancestor_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for row in resource_ancestors {
+        let resource = expect_json_string_field(row, "resource")?;
+        let ancestor = expect_json_string_field(row, "ancestor")?;
+        ancestor_map.entry(resource).or_default().push(ancestor);
+    }
+
+    let mut out = Vec::new();
+    for request in stream {
+        let request_json = value_to_json(request.clone());
+        let principal = expect_json_string_field(&request_json, "principal")?;
+        let action = expect_json_string_field(&request_json, "action")?;
+        let resource = expect_json_string_field(&request_json, "resource")?;
+
+        let roles = roles_by_principal
+            .get(&principal)
+            .cloned()
+            .unwrap_or_default();
+        let reachable_resources = collect_resource_ancestors(&resource, &ancestor_map);
+
+        let mut matches = Vec::new();
+        for role in &roles {
+            if let Some(candidates) = perms_by_role_action.get(&(role.clone(), action.clone())) {
+                for perm in candidates {
+                    let perm_resource = expect_json_string_field(perm, "resource")?;
+                    if reachable_resources.iter().any(|r| r == &perm_resource) {
+                        matches.push(perm.clone());
+                    }
+                }
+            }
+        }
+
+        out.push(json_to_value(JsonValue::Object(Map::from_iter([
+            ("request".to_string(), request_json),
+            (
+                "decision".to_string(),
+                JsonValue::String(if matches.is_empty() {
+                    "deny".to_string()
+                } else {
+                    "allow".to_string()
+                }),
+            ),
+            ("matches".to_string(), JsonValue::Array(matches)),
+        ]))));
+    }
+
+    Ok(Stream::new(out))
+}
+
+fn collect_resource_ancestors(
+    resource: &str,
+    ancestor_map: &BTreeMap<String, Vec<String>>,
+) -> Vec<String> {
+    let mut out = vec![resource.to_string()];
+    let mut idx = 0usize;
+    while idx < out.len() {
+        if let Some(ancestors) = ancestor_map.get(&out[idx]) {
+            for ancestor in ancestors {
+                if !out.iter().any(|existing| existing == ancestor) {
+                    out.push(ancestor.clone());
+                }
+            }
+        }
+        idx += 1;
+    }
+    out
+}
+
+fn expect_json_string_field(value: &JsonValue, name: &str) -> Result<String, String> {
+    match value {
+        JsonValue::Object(map) => match map.get(name) {
+            Some(JsonValue::String(value)) => Ok(value.clone()),
+            _ => Err(format!("expected string field '{name}'")),
+        },
+        _ => Err("expected object".to_string()),
     }
 }
 
@@ -354,7 +516,10 @@ fn eval_value_expr_with_env(expr: &Expr, env: &BTreeMap<String, Value>) -> Resul
         Expr::Record { fields, .. } => {
             let mut out = BTreeMap::new();
             for field in fields {
-                out.insert(field.name.clone(), eval_value_expr_with_env(&field.value, env)?);
+                out.insert(
+                    field.name.clone(),
+                    eval_value_expr_with_env(&field.value, env)?,
+                );
             }
             Ok(Value::Record(out))
         }
@@ -425,7 +590,11 @@ fn eval_value_expr_with_env(expr: &Expr, env: &BTreeMap<String, Value>) -> Resul
     }
 }
 
-fn eval_with_current(expr: &Expr, env: &BTreeMap<String, Value>, current: Value) -> Result<Value, String> {
+fn eval_with_current(
+    expr: &Expr,
+    env: &BTreeMap<String, Value>,
+    current: Value,
+) -> Result<Value, String> {
     let mut scoped = env.clone();
     scoped.insert("_".to_string(), current);
     eval_value_expr_with_env(expr, &scoped)
@@ -640,7 +809,9 @@ fn parse_fixtures(fixtures: JsonValue) -> Result<BTreeMap<String, Vec<JsonValue>
 fn callee_name(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Ident { name, .. } => Some(name.clone()),
-        Expr::FieldAccess { expr, field, .. } => callee_name(expr).map(|base| format!("{base}.{field}")),
+        Expr::FieldAccess { expr, field, .. } => {
+            callee_name(expr).map(|base| format!("{base}.{field}"))
+        }
         _ => None,
     }
 }
