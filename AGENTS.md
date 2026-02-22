@@ -19,36 +19,36 @@ This repo is a Rust workspace + React (Vite) app for a tiny pipeline DSL.
 - Reversible stage direction is chosen by runtime type tags unless `~` forces inverse.
 - Stages that produce structured outputs should prefer stable record shapes:
   - `lookup.*` outputs `{ left, right }`
-    - grouping outputs `{ key, items }`
+  - grouping outputs `{ key, items }`
 
-    ## Adding a new stage
-    When adding a stage:
-    1) Update `dsl_runtime`:
-       - Parse stage call + args in `eval_expr` (stage constructor)
-          - Implement `apply_stage` behavior
-          2) Add tests in `crates/dsl_runtime/tests/` covering:
-             - happy path
-                - type errors / missing args
-                3) Add or update a web example in `web/src/App.tsx` (or future examples loader)
-                4) Update `LANGUAGE.md`:
-                   - stage signature
-                      - output shapes
-                         - minimal example
+## Adding a new stage
+When adding a stage:
+1) Update `dsl_runtime`:
+   - Parse stage call + args in `eval_expr` (stage constructor)
+   - Implement `apply_stage` behavior
+2) Add tests in `crates/dsl_runtime/tests/` covering:
+   - happy path
+   - type errors / missing args
+3) Add or update a web example in `web/src/App.tsx` (or future examples loader)
+4) Update `LANGUAGE.md`:
+   - stage signature
+   - output shapes
+   - minimal example
 
-                         ## Parser conventions
-                         - Keep parsing errors span-aware and human-friendly.
-                         - Avoid adding syntax that conflicts with existing operators (`:=`, `|>`, `>>`, `~`).
+## Parser conventions
+- Keep parsing errors span-aware and human-friendly.
+- Avoid adding syntax that conflicts with existing operators (`:=`, `|>`, `>>`, `~`).
 
-                         ## Web UI conventions
-                         - The playground should render:
-                           - `Explain` output
-                             - tables as HTML tables when possible
-                               - logs
-                               - Prefer minimal dependencies; if adding an editor, keep it lightweight and stable.
-                               - Ensure `npm run build` passes.
+## Web UI conventions
+- The playground should render:
+  - `Explain` output
+  - tables as HTML tables when possible
+  - logs
+- Prefer minimal dependencies; if adding an editor, keep it lightweight and stable.
+- Ensure `npm run build` passes.
 
-                               ## Checks before merging
-                               - `cargo test`
-                               - `cd web && npm run build`
-                               - Ensure example programs in UI still run
-                               - If behavior changes: update `LANGUAGE.md` and note it in `README.md` “Implemented features” section.
+## Checks before merging
+- `cargo test`
+- `cd web && npm run build`
+- Ensure example programs in UI still run
+- If behavior changes: update `LANGUAGE.md` and note it in `README.md` “Implemented features” section.
