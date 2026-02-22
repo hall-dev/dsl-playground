@@ -5,5 +5,6 @@
   {"id":"04_trending_hashtags","name":"04 Trending hashtags (windowless)"},
   {"id":"05_rbac_minimal","name":"05 RBAC minimal (matches-only)"},
   {"id":"06_stories_tray_snapshot","name":"06 Stories tray snapshot (filter + group-ish)"},
-  {"id":"07_rbac_full","name":"07 RBAC full"}
+  {"id":"07_rbac_full","name":"07 RBAC full"},
+  {"id":"08_top_k_frequent","name":"08 Top K frequent"}
 ]

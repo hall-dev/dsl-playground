@@ -96,3 +96,20 @@ input.json("events")
     assert!(got.contains("Named"));
     assert!(got.contains("within_ms"));
 }
+
+#[test]
+fn parses_group_count_stage() {
+    let src = r#"
+input.json("rows")
+  |> json
+  |> group.count(by_key=_.tag)
+  |> rank.topk(k=3, by=_.count, order="desc")
+  |> ui.table("out");
+"#;
+    let got = parse_debug(src);
+    assert!(got.contains("group"));
+    assert!(got.contains("count"));
+    assert!(got.contains("rank"));
+    assert!(got.contains("topk"));
+    assert!(got.contains("Named"));
+}

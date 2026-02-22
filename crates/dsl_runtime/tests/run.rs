@@ -380,6 +380,90 @@ input.json("rows")
 }
 
 #[test]
+fn group_count_counts_by_key_and_preserves_first_seen_group_order() {
+    let program = r#"
+input.json("rows")
+  |> json
+  |> group.count(by_key=_.tag)
+  |> ui.table("out");
+"#;
+
+    let out = run(
+        program,
+        json!({"rows": [
+            {"tag": "rust", "id": 1},
+            {"tag": "sql", "id": 2},
+            {"tag": "rust", "id": 3},
+            {"tag": "sql", "id": 4},
+            {"tag": "rust", "id": 5}
+        ]}),
+    )
+    .expect("program should run");
+
+    assert_eq!(
+        out.tables.get("out"),
+        Some(&vec![
+            json!({"key": "rust", "count": 3}),
+            json!({"key": "sql", "count": 2})
+        ])
+    );
+}
+
+#[test]
+fn group_count_top_k_frequent() {
+    let program = r#"
+input.json("rows")
+  |> json
+  |> group.count(by_key=_.tag)
+  |> rank.topk(k=2, by=_.count, order="desc")
+  |> ui.table("top");
+"#;
+
+    let out = run(
+        program,
+        json!({"rows": [
+            {"tag": "rust"},
+            {"tag": "ui"},
+            {"tag": "rust"},
+            {"tag": "db"},
+            {"tag": "ui"},
+            {"tag": "rust"},
+            {"tag": "ui"},
+            {"tag": "api"}
+        ]}),
+    )
+    .expect("program should run");
+
+    assert_eq!(
+        out.tables.get("top"),
+        Some(&vec![
+            json!({"key": "rust", "count": 3}),
+            json!({"key": "ui", "count": 3})
+        ])
+    );
+}
+
+#[test]
+fn group_count_requires_string_or_i64_keys() {
+    let program = r#"
+input.json("rows")
+  |> json
+  |> group.count(by_key=_.obj)
+  |> ui.table("out");
+"#;
+
+    let err = run(
+        program,
+        json!({"rows": [
+            {"obj": {"nested": true}}
+        ]}),
+    )
+    .expect_err("program should fail");
+
+    assert!(err.contains("group.count by_key must evaluate to I64 or String"));
+}
+
+#[test]
 fn group_topn_items_per_key() {
     let program = r#"
 input.json("stories")

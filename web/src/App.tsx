@@ -103,7 +103,27 @@ input.json("events")
     fixtures: '{"xs":[12,5,19,7,19,3]}',
   },
   {
-    name: 'H. Stories tray: latest 2 per author',
+    name: 'H. Top K frequent',
+    program: `input.json("rows")
+  |> json
+  |> group.count(by_key=_.tag)
+  |> rank.topk(k=3, by=_.count, order="desc")
+  |> ui.table("top_freq");`,
+    fixtures: `{
+  "rows": [
+    {"tag": "rust"},
+    {"tag": "ui"},
+    {"tag": "rust"},
+    {"tag": "db"},
+    {"tag": "ui"},
+    {"tag": "rust"},
+    {"tag": "ui"},
+    {"tag": "api"}
+  ]
+}`,
+  },
+  {
+    name: 'I. Stories tray: latest 2 per author',
     program: `input.json("inbox")
   |> json
   |> group.topn_items(by_key=_.author_id, n=2, order_by=_.created_at, order="desc")

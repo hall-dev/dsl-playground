@@ -62,6 +62,9 @@ enum Stage {
         within_ms: i64,
         limit: i64,
     },
+    GroupCount {
+        by_key: Expr,
+    },
     RankTopK {
         k: i64,
         by: Expr,
@@ -200,6 +203,9 @@ fn eval_expr(
                     within_ms: expect_i64_literal(named_arg(args, "within_ms")?)?,
                     limit: expect_i64_literal(named_arg(args, "limit")?)?,
                 })),
+                "group.count" => Ok(Binding::Stage(Stage::GroupCount {
+                    by_key: named_arg(args, "by_key")?.clone(),
+                })),
                 "rank.topk" => Ok(Binding::Stage(Stage::RankTopK {
                     k: expect_i64_literal(named_arg(args, "k")?)?,
                     by: named_arg(args, "by")?.clone(),
@@ -334,6 +340,32 @@ fn apply_stage(
                     Value::Record(BTreeMap::from([
                         ("key".to_string(), key),
                         ("items".to_string(), Value::Array(items)),
+                    ]))
+                })
+                .collect();
+            Ok(Stream::new(out))
+        }
+        Stage::GroupCount { by_key } => {
+            outputs.explain.push("  [pure] group.count".to_string());
+
+            let mut groups: Vec<(Value, i64)> = Vec::new();
+            for item in stream {
+                let key = eval_value_expr(by_key, Some(&item))?;
+                expect_group_key(&key, "group.count by_key must evaluate to I64 or String")?;
+
+                if let Some((_, count)) = groups.iter_mut().find(|(k, _)| *k == key) {
+                    *count += 1;
+                } else {
+                    groups.push((key, 1));
+                }
+            }
+
+            let out = groups
+                .into_iter()
+                .map(|(key, count)| {
+                    Value::Record(BTreeMap::from([
+                        ("key".to_string(), key),
+                        ("count".to_string(), Value::I64(count)),
                     ]))
                 })
                 .collect();
