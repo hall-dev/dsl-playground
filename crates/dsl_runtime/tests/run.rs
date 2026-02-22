@@ -502,3 +502,71 @@ input.json("stories")
         ])
     );
 }
+
+#[test]
+fn rank_kmerge_arrays_merges_sorted_lists_with_limit() {
+    let program = r#"
+input.json("batches")
+  |> json
+  |> rank.kmerge_arrays(by=_, order="asc", limit=5)
+  |> ui.table("out");
+"#;
+
+    let out = run(
+        program,
+        json!({"batches": [
+            [[1, 4, 7], [2, 3, 10], [5, 6]]
+        ]}),
+    )
+    .expect("program should run");
+
+    assert_eq!(
+        out.tables.get("out"),
+        Some(&vec![json!(1), json!(2), json!(3), json!(4), json!(5)])
+    );
+}
+
+#[test]
+fn rank_kmerge_arrays_supports_desc_and_field_key() {
+    let program = r#"
+input.json("batches")
+  |> json
+  |> rank.kmerge_arrays(by=_.score, order="desc", limit=4)
+  |> ui.table("out");
+"#;
+
+    let out = run(
+        program,
+        json!({"batches": [
+            [
+                [{"id": "a", "score": 9}, {"id": "b", "score": 6}],
+                [{"id": "c", "score": 8}, {"id": "d", "score": 5}],
+                [{"id": "e", "score": 7}]
+            ]
+        ]}),
+    )
+    .expect("program should run");
+
+    assert_eq!(
+        out.tables.get("out"),
+        Some(&vec![
+            json!({"id": "a", "score": 9}),
+            json!({"id": "c", "score": 8}),
+            json!({"id": "e", "score": 7}),
+            json!({"id": "b", "score": 6})
+        ])
+    );
+}
+
+#[test]
+fn rank_kmerge_arrays_requires_nested_arrays() {
+    let program = r#"
+input.json("rows")
+  |> json
+  |> rank.kmerge_arrays(by=_, order="asc", limit=3)
+  |> ui.table("out");
+"#;
+
+    let err = run(program, json!({"rows": [[1, 2, 3]]})).expect_err("program should fail");
+    assert!(err.contains("rank.kmerge_arrays input value must be Array[Array[Value]]"));
+}

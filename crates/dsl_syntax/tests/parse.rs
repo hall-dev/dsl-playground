@@ -113,3 +113,18 @@ input.json("rows")
     assert!(got.contains("topk"));
     assert!(got.contains("Named"));
 }
+
+#[test]
+fn parses_rank_kmerge_arrays_stage() {
+    let src = r#"
+input.json("rows")
+  |> json
+  |> rank.kmerge_arrays(by=_.score, order="desc", limit=10)
+  |> ui.table("out");
+"#;
+    let got = parse_debug(src);
+    assert!(got.contains("rank"));
+    assert!(got.contains("kmerge_arrays"));
+    assert!(got.contains("Named"));
+    assert!(got.contains("limit"));
+}

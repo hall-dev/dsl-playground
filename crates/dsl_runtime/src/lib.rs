@@ -70,6 +70,11 @@ enum Stage {
         by: Expr,
         order: SortOrder,
     },
+    RankKMergeArrays {
+        by: Expr,
+        order: SortOrder,
+        limit: i64,
+    },
     GroupTopNItems {
         by_key: Expr,
         n: i64,
@@ -210,6 +215,11 @@ fn eval_expr(
                     k: expect_i64_literal(named_arg(args, "k")?)?,
                     by: named_arg(args, "by")?.clone(),
                     order: parse_sort_order(named_arg(args, "order")?)?,
+                })),
+                "rank.kmerge_arrays" => Ok(Binding::Stage(Stage::RankKMergeArrays {
+                    by: named_arg(args, "by")?.clone(),
+                    order: parse_sort_order(named_arg(args, "order")?)?,
+                    limit: expect_i64_literal(named_arg(args, "limit")?)?,
                 })),
                 "group.topn_items" => Ok(Binding::Stage(Stage::GroupTopNItems {
                     by_key: named_arg(args, "by_key")?.clone(),
@@ -396,6 +406,78 @@ fn apply_stage(
                 .take(top_k)
                 .map(|(_, _, item)| item)
                 .collect();
+            Ok(Stream::new(out))
+        }
+        Stage::RankKMergeArrays { by, order, limit } => {
+            if *limit < 0 {
+                return Err("rank.kmerge_arrays limit must be >= 0".to_string());
+            }
+            outputs
+                .explain
+                .push("  [pure] rank.kmerge_arrays".to_string());
+
+            let mut out = Vec::new();
+            for item in stream {
+                let lists = match item {
+                    Value::Array(values) => values,
+                    _ => {
+                        return Err("rank.kmerge_arrays input value must be Array[Array[Value]]"
+                            .to_string())
+                    }
+                };
+
+                let mut list_values = Vec::new();
+                for value in lists {
+                    match value {
+                        Value::Array(values) => list_values.push(values),
+                        _ => {
+                            return Err(
+                                "rank.kmerge_arrays input value must be Array[Array[Value]]"
+                                    .to_string(),
+                            )
+                        }
+                    }
+                }
+
+                let mut idxs = vec![0usize; list_values.len()];
+                let mut emitted = 0usize;
+                let max_items = *limit as usize;
+                while emitted < max_items {
+                    let mut best: Option<(usize, usize, SortKey)> = None;
+                    for (list_idx, list) in list_values.iter().enumerate() {
+                        let elem_idx = idxs[list_idx];
+                        if elem_idx >= list.len() {
+                            continue;
+                        }
+                        let candidate = list[elem_idx].clone();
+                        let key = expect_sort_key(
+                            eval_value_expr(by, Some(&candidate))?,
+                            "rank.kmerge_arrays by expression must evaluate to I64 or String",
+                        )?;
+
+                        let should_take = match &best {
+                            None => true,
+                            Some((best_list_idx, _, best_key)) => {
+                                compare_keys(&key, best_key, *order)
+                                    .then_with(|| list_idx.cmp(best_list_idx))
+                                    .is_lt()
+                            }
+                        };
+
+                        if should_take {
+                            best = Some((list_idx, elem_idx, key));
+                        }
+                    }
+
+                    let Some((best_list_idx, best_elem_idx, _)) = best else {
+                        break;
+                    };
+                    out.push(list_values[best_list_idx][best_elem_idx].clone());
+                    idxs[best_list_idx] += 1;
+                    emitted += 1;
+                }
+            }
+
             Ok(Stream::new(out))
         }
         Stage::GroupTopNItems {
