@@ -60,6 +60,56 @@ requests
   ]
 }`,
   },
+
+  {
+    name: 'E. KV + lookup demo',
+    program: `input.json("users") |> json |> kv.load(store="users");
+
+input.json("events")
+  |> json
+  |> lookup.kv(store="users", key=_.user_id)
+  |> ui.table("joined");`,
+    fixtures: `{
+  "users": [
+    {"key": "u1", "value": {"name": "Ada"}},
+    {"key": "u2", "value": {"name": "Lin"}}
+  ],
+  "events": [
+    {"user_id": "u1", "action": "login"},
+    {"user_id": "u9", "action": "logout"}
+  ]
+}`,
+  },
+  {
+    name: 'F. group.collect_all demo',
+    program: `input.json("rows")
+  |> json
+  |> group.collect_all(by_key=_.team, within_ms=1000, limit=10)
+  |> ui.table("groups");`,
+    fixtures: `{
+  "rows": [
+    {"team": "a", "id": 1},
+    {"team": "b", "id": 2},
+    {"team": "a", "id": 3}
+  ]
+}`,
+  },
+  {
+    name: 'G. Stories tray snapshot demo (simple)',
+    program: `inbox := input.json("inbox") |> json;
+
+inbox
+  |> filter(_.expires_at > "2026-02-21T12:00:00Z")
+  |> map({ author_id: _.author_id, story_id: _.story_id, created_at: _.created_at })
+  |> ui.table("tray_items");`,
+    fixtures: `{
+  "inbox": [
+    {"author_id":"user/a1","story_id":"s1","created_at":"2026-02-21T10:00:00Z","expires_at":"2026-02-22T10:00:00Z"},
+    {"author_id":"user/a1","story_id":"s2","created_at":"2026-02-21T11:00:00Z","expires_at":"2026-02-22T11:00:00Z"},
+    {"author_id":"user/a2","story_id":"s3","created_at":"2026-02-20T23:00:00Z","expires_at":"2026-02-21T11:30:00Z"}
+  ]
+}`,
+  },
 ];
 
 const pretty = (value: string) => {
@@ -166,7 +216,7 @@ export function App() {
 
   return (
     <main style={{ fontFamily: 'sans-serif', padding: 16, maxWidth: 1000, margin: '0 auto' }}>
-      <h1>DSL Playground (v0)</h1>
+      <h1>DSL Playground (v0 + v1 preview)</h1>
       <p>{status}</p>
 
       <label>
