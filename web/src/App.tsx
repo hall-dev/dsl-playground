@@ -95,18 +95,25 @@ input.json("events")
 }`,
   },
   {
-    name: 'G. Stories tray snapshot demo (simple)',
-    program: `inbox := input.json("inbox") |> json;
-
-inbox
-  |> filter(_.expires_at > "2026-02-21T12:00:00Z")
-  |> map({ author_id: _.author_id, story_id: _.story_id, created_at: _.created_at })
+    name: 'G. Top K numbers',
+    program: `input.json("xs")
+  |> json
+  |> rank.topk(k=3, by=_, order="desc")
+  |> ui.table("topk");`,
+    fixtures: '{"xs":[12,5,19,7,19,3]}',
+  },
+  {
+    name: 'H. Stories tray: latest 2 per author',
+    program: `input.json("inbox")
+  |> json
+  |> group.topn_items(by_key=_.author_id, n=2, order_by=_.created_at, order="desc")
   |> ui.table("tray_items");`,
     fixtures: `{
   "inbox": [
-    {"author_id":"user/a1","story_id":"s1","created_at":"2026-02-21T10:00:00Z","expires_at":"2026-02-22T10:00:00Z"},
-    {"author_id":"user/a1","story_id":"s2","created_at":"2026-02-21T11:00:00Z","expires_at":"2026-02-22T11:00:00Z"},
-    {"author_id":"user/a2","story_id":"s3","created_at":"2026-02-20T23:00:00Z","expires_at":"2026-02-21T11:30:00Z"}
+    {"author_id":"user/a1","story_id":"s1","created_at":"2026-02-21T10:00:00Z"},
+    {"author_id":"user/a1","story_id":"s2","created_at":"2026-02-21T11:00:00Z"},
+    {"author_id":"user/a1","story_id":"s4","created_at":"2026-02-21T12:00:00Z"},
+    {"author_id":"user/a2","story_id":"s3","created_at":"2026-02-20T23:00:00Z"}
   ]
 }`,
   },

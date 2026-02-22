@@ -62,8 +62,24 @@ enum Stage {
         within_ms: i64,
         limit: i64,
     },
-    KvLoad { store: String },
-    LookupKv { store: String, key: Expr },
+    RankTopK {
+        k: i64,
+        by: Expr,
+        order: SortOrder,
+    },
+    GroupTopNItems {
+        by_key: Expr,
+        n: i64,
+        order_by: Expr,
+        order: SortOrder,
+    },
+    KvLoad {
+        store: String,
+    },
+    LookupKv {
+        store: String,
+        key: Expr,
+    },
     LookupBatchKv {
         store: String,
         key: Expr,
@@ -89,6 +105,18 @@ enum Direction {
     Inverse,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum SortOrder {
+    Asc,
+    Desc,
+}
+
+#[derive(Debug, Clone)]
+enum SortKey {
+    I64(i64),
+    String(String),
+}
+
 pub fn compile(program: &str) -> Result<Program, String> {
     parse_program(program).map_err(|e| e.to_string())
 }
@@ -109,7 +137,13 @@ pub fn run(program: &str, fixtures: JsonValue) -> Result<Outputs, String> {
             }
             Stmt::Pipeline { expr, .. } => {
                 outputs.explain.push("pipeline".to_string());
-                let _ = expect_stream(eval_expr(expr, &env, &fixture_map, &mut state, &mut outputs)?)?;
+                let _ = expect_stream(eval_expr(
+                    expr,
+                    &env,
+                    &fixture_map,
+                    &mut state,
+                    &mut outputs,
+                )?)?;
             }
         }
     }
@@ -165,6 +199,17 @@ fn eval_expr(
                     by_key: named_arg(args, "by_key")?.clone(),
                     within_ms: expect_i64_literal(named_arg(args, "within_ms")?)?,
                     limit: expect_i64_literal(named_arg(args, "limit")?)?,
+                })),
+                "rank.topk" => Ok(Binding::Stage(Stage::RankTopK {
+                    k: expect_i64_literal(named_arg(args, "k")?)?,
+                    by: named_arg(args, "by")?.clone(),
+                    order: parse_sort_order(named_arg(args, "order")?)?,
+                })),
+                "group.topn_items" => Ok(Binding::Stage(Stage::GroupTopNItems {
+                    by_key: named_arg(args, "by_key")?.clone(),
+                    n: expect_i64_literal(named_arg(args, "n")?)?,
+                    order_by: named_arg(args, "order_by")?.clone(),
+                    order: parse_sort_order(named_arg(args, "order")?)?,
                 })),
                 "kv.load" => Ok(Binding::Stage(Stage::KvLoad {
                     store: expect_string(named_arg(args, "store")?)?,
@@ -289,6 +334,89 @@ fn apply_stage(
                     Value::Record(BTreeMap::from([
                         ("key".to_string(), key),
                         ("items".to_string(), Value::Array(items)),
+                    ]))
+                })
+                .collect();
+            Ok(Stream::new(out))
+        }
+        Stage::RankTopK { k, by, order } => {
+            if *k < 0 {
+                return Err("rank.topk k must be >= 0".to_string());
+            }
+            outputs.explain.push("  [pure] rank.topk".to_string());
+
+            let mut rows: Vec<(usize, SortKey, Value)> = Vec::new();
+            for (idx, item) in stream.into_iter().enumerate() {
+                let key = expect_sort_key(
+                    eval_value_expr(by, Some(&item))?,
+                    "rank.topk by expression must evaluate to I64 or String",
+                )?;
+                rows.push((idx, key, item));
+            }
+
+            rows.sort_by(|(idx_a, key_a, _), (idx_b, key_b, _)| {
+                compare_keys(key_a, key_b, *order).then_with(|| idx_a.cmp(idx_b))
+            });
+
+            let top_k = *k as usize;
+            let out = rows
+                .into_iter()
+                .take(top_k)
+                .map(|(_, _, item)| item)
+                .collect();
+            Ok(Stream::new(out))
+        }
+        Stage::GroupTopNItems {
+            by_key,
+            n,
+            order_by,
+            order,
+        } => {
+            if *n < 0 {
+                return Err("group.topn_items n must be >= 0".to_string());
+            }
+            outputs
+                .explain
+                .push("  [pure] group.topn_items".to_string());
+
+            let mut groups: Vec<(Value, Vec<(usize, SortKey, Value)>)> = Vec::new();
+            for (idx, item) in stream.into_iter().enumerate() {
+                let key = eval_value_expr(by_key, Some(&item))?;
+                expect_group_key(
+                    &key,
+                    "group.topn_items by_key must evaluate to I64 or String",
+                )?;
+                let order_key = expect_sort_key(
+                    eval_value_expr(order_by, Some(&item))?,
+                    "group.topn_items order_by must evaluate to I64 or String",
+                )?;
+
+                if let Some((_, items)) = groups
+                    .iter_mut()
+                    .find(|(existing_key, _)| *existing_key == key)
+                {
+                    items.push((idx, order_key, item));
+                } else {
+                    groups.push((key, vec![(idx, order_key, item)]));
+                }
+            }
+
+            let max_items = *n as usize;
+            let out = groups
+                .into_iter()
+                .map(|(key, mut items)| {
+                    items.sort_by(|(idx_a, key_a, _), (idx_b, key_b, _)| {
+                        compare_keys(key_a, key_b, *order).then_with(|| idx_a.cmp(idx_b))
+                    });
+                    if items.len() > max_items {
+                        items.truncate(max_items);
+                    }
+                    Value::Record(BTreeMap::from([
+                        ("key".to_string(), key),
+                        (
+                            "items".to_string(),
+                            Value::Array(items.into_iter().map(|(_, _, item)| item).collect()),
+                        ),
                     ]))
                 })
                 .collect();
@@ -966,6 +1094,43 @@ fn expect_i64_literal(expr: &Expr) -> Result<i64, String> {
     match expr {
         Expr::Number { value, .. } => Ok(*value),
         _ => Err("expected i64 literal".to_string()),
+    }
+}
+
+fn parse_sort_order(expr: &Expr) -> Result<SortOrder, String> {
+    match expect_string(expr)?.as_str() {
+        "asc" => Ok(SortOrder::Asc),
+        "desc" => Ok(SortOrder::Desc),
+        _ => Err("order must be \"asc\" or \"desc\"".to_string()),
+    }
+}
+
+fn expect_sort_key(value: Value, err: &str) -> Result<SortKey, String> {
+    match value {
+        Value::I64(v) => Ok(SortKey::I64(v)),
+        Value::String(v) => Ok(SortKey::String(v)),
+        _ => Err(err.to_string()),
+    }
+}
+
+fn expect_group_key(value: &Value, err: &str) -> Result<(), String> {
+    match value {
+        Value::I64(_) | Value::String(_) => Ok(()),
+        _ => Err(err.to_string()),
+    }
+}
+
+fn compare_keys(a: &SortKey, b: &SortKey, order: SortOrder) -> std::cmp::Ordering {
+    let cmp = match (a, b) {
+        (SortKey::I64(x), SortKey::I64(y)) => x.cmp(y),
+        (SortKey::String(x), SortKey::String(y)) => x.cmp(y),
+        (SortKey::I64(_), SortKey::String(_)) => std::cmp::Ordering::Less,
+        (SortKey::String(_), SortKey::I64(_)) => std::cmp::Ordering::Greater,
+    };
+
+    match order {
+        SortOrder::Asc => cmp,
+        SortOrder::Desc => cmp.reverse(),
     }
 }
 

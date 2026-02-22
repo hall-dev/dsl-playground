@@ -333,3 +333,88 @@ input.json("rows")
         ])
     );
 }
+
+#[test]
+fn rank_topk_on_ints_desc_with_stable_ties() {
+    let program = r#"
+input.json("xs")
+  |> json
+  |> rank.topk(k=3, by=_, order="desc")
+  |> ui.table("out");
+"#;
+
+    let out = run(program, json!({"xs": [3, 1, 4, 3, 2]})).expect("program should run");
+    assert_eq!(
+        out.tables.get("out"),
+        Some(&vec![json!(4), json!(3), json!(3)])
+    );
+}
+
+#[test]
+fn rank_topk_on_records_by_field() {
+    let program = r#"
+input.json("rows")
+  |> json
+  |> rank.topk(k=2, by=_.score, order="asc")
+  |> ui.table("out");
+"#;
+
+    let out = run(
+        program,
+        json!({"rows": [
+            {"id": "a", "score": 8},
+            {"id": "b", "score": 3},
+            {"id": "c", "score": 5},
+            {"id": "d", "score": 3}
+        ]}),
+    )
+    .expect("program should run");
+
+    assert_eq!(
+        out.tables.get("out"),
+        Some(&vec![
+            json!({"id": "b", "score": 3}),
+            json!({"id": "d", "score": 3})
+        ])
+    );
+}
+
+#[test]
+fn group_topn_items_per_key() {
+    let program = r#"
+input.json("stories")
+  |> json
+  |> group.topn_items(by_key=_.author_id, n=2, order_by=_.created_at, order="desc")
+  |> ui.table("out");
+"#;
+
+    let out = run(
+        program,
+        json!({"stories": [
+            {"author_id": "a1", "story_id": "s1", "created_at": "2026-02-21T10:00:00Z"},
+            {"author_id": "a2", "story_id": "s2", "created_at": "2026-02-21T09:00:00Z"},
+            {"author_id": "a1", "story_id": "s3", "created_at": "2026-02-21T12:00:00Z"},
+            {"author_id": "a1", "story_id": "s4", "created_at": "2026-02-21T11:00:00Z"}
+        ]}),
+    )
+    .expect("program should run");
+
+    assert_eq!(
+        out.tables.get("out"),
+        Some(&vec![
+            json!({
+                "key": "a1",
+                "items": [
+                    {"author_id": "a1", "story_id": "s3", "created_at": "2026-02-21T12:00:00Z"},
+                    {"author_id": "a1", "story_id": "s4", "created_at": "2026-02-21T11:00:00Z"}
+                ]
+            }),
+            json!({
+                "key": "a2",
+                "items": [
+                    {"author_id": "a2", "story_id": "s2", "created_at": "2026-02-21T09:00:00Z"}
+                ]
+            })
+        ])
+    );
+}
