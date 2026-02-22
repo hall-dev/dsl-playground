@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "predev": "node ./scripts/prepare-wasm.mjs",
+    "prebuild": "node ./scripts/prepare-wasm.mjs"
   },
   "dependencies": {
     "@codemirror/commands": "^6.8.1",
