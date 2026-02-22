@@ -2,6 +2,7 @@
 members = [
   "crates/dsl_syntax",
   "crates/dsl_runtime",
+  "crates/serde_json",
   "crates/dsl_wasm",
 ]
 resolver = "2"
