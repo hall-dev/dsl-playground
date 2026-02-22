@@ -52,3 +52,26 @@ v;
     assert!(got.contains("Array"));
     assert!(got.contains("FieldAccess"));
 }
+
+#[test]
+fn parses_group_collect_all_and_array_helpers() {
+    let src = r#"
+input.json("xs")
+  |> json
+  |> group.collect_all(by_key=_.kind, within_ms=100, limit=10)
+  |> map({
+    mapped: array.map(_.items, _.id),
+    filtered: array.filter(_.items, _.ok),
+    any_ok: array.any(_.items, _.ok),
+    flat: array.flat_map(_.items, [_.id]),
+    has_one: array.contains(array.map(_.items, _.id), 1)
+  })
+  |> ui.table("out");
+"#;
+    let got = parse_debug(src);
+    assert!(got.contains("group"));
+    assert!(got.contains("collect_all"));
+    assert!(got.contains("Named"));
+    assert!(got.contains("array"));
+    assert!(got.contains("contains"));
+}
