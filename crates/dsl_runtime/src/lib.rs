@@ -52,6 +52,11 @@ enum Stage {
     Map(Expr),
     Filter(Expr),
     FlatMap(Expr),
+    GroupCollectAll {
+        by_key: Expr,
+        within_ms: i64,
+        limit: i64,
+    },
     Json(Direction),
     Utf8(Direction),
     Base64(Direction),
@@ -132,6 +137,11 @@ fn eval_expr(
                 "map" => Ok(Binding::Stage(Stage::Map(positional_arg(args, 0)?.clone()))),
                 "filter" => Ok(Binding::Stage(Stage::Filter(positional_arg(args, 0)?.clone()))),
                 "flat_map" => Ok(Binding::Stage(Stage::FlatMap(positional_arg(args, 0)?.clone()))),
+                "group.collect_all" => Ok(Binding::Stage(Stage::GroupCollectAll {
+                    by_key: named_arg(args, "by_key")?.clone(),
+                    within_ms: expect_i64_literal(named_arg(args, "within_ms")?)?,
+                    limit: expect_i64_literal(named_arg(args, "limit")?)?,
+                })),
                 "ui.table" => Ok(Binding::Stage(Stage::UiTable(expect_string(positional_arg(
                     args, 0,
                 )?)?))),
@@ -190,6 +200,46 @@ fn apply_stage(stage: &Stage, stream: Stream, outputs: &mut Outputs) -> Result<S
                     _ => return Err("flat_map expression must return Array".to_string()),
                 }
             }
+            Ok(Stream::new(out))
+        }
+        Stage::GroupCollectAll {
+            by_key,
+            within_ms,
+            limit,
+        } => {
+            if *within_ms < 0 {
+                return Err("group.collect_all within_ms must be >= 0".to_string());
+            }
+            if *limit < 0 {
+                return Err("group.collect_all limit must be >= 0".to_string());
+            }
+            outputs
+                .explain
+                .push("  [pure] group.collect_all".to_string());
+
+            let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
+            for item in stream {
+                let key = eval_value_expr(by_key, Some(&item))?;
+                if let Some((_, items)) = groups.iter_mut().find(|(k, _)| *k == key) {
+                    items.push(item);
+                } else {
+                    groups.push((key, vec![item]));
+                }
+            }
+
+            let max_items = *limit as usize;
+            let out = groups
+                .into_iter()
+                .map(|(key, mut items)| {
+                    if items.len() > max_items {
+                        items.truncate(max_items);
+                    }
+                    Value::Record(BTreeMap::from([
+                        ("key".to_string(), key),
+                        ("items".to_string(), Value::Array(items)),
+                    ]))
+                })
+                .collect();
             Ok(Stream::new(out))
         }
         Stage::Json(direction) => {
@@ -315,8 +365,76 @@ fn eval_value_expr_with_env(expr: &Expr, env: &BTreeMap<String, Value>) -> Resul
             _ => Err("field access requires a record".to_string()),
         },
         Expr::Raw { text, .. } => eval_raw(text, env),
-        Expr::Call { .. } => Err("function calls are not supported inside expressions".to_string()),
+        Expr::Call { callee, args, .. } => {
+            let name = callee_name(callee).ok_or_else(|| "unsupported callee".to_string())?;
+            match name.as_str() {
+                "array.map" => {
+                    let arr = eval_value_expr_with_env(positional_arg(args, 0)?, env)?;
+                    let func = positional_arg(args, 1)?;
+                    let items = expect_array(arr)?;
+                    let mut out = Vec::new();
+                    for item in items {
+                        out.push(eval_with_current(func, env, item)?);
+                    }
+                    Ok(Value::Array(out))
+                }
+                "array.filter" => {
+                    let arr = eval_value_expr_with_env(positional_arg(args, 0)?, env)?;
+                    let func = positional_arg(args, 1)?;
+                    let items = expect_array(arr)?;
+                    let mut out = Vec::new();
+                    for item in items {
+                        if truthy(&eval_with_current(func, env, item.clone())?)? {
+                            out.push(item);
+                        }
+                    }
+                    Ok(Value::Array(out))
+                }
+                "array.any" => {
+                    let arr = eval_value_expr_with_env(positional_arg(args, 0)?, env)?;
+                    let func = positional_arg(args, 1)?;
+                    let items = expect_array(arr)?;
+                    for item in items {
+                        if truthy(&eval_with_current(func, env, item)?)? {
+                            return Ok(Value::Bool(true));
+                        }
+                    }
+                    Ok(Value::Bool(false))
+                }
+                "array.flat_map" => {
+                    let arr = eval_value_expr_with_env(positional_arg(args, 0)?, env)?;
+                    let func = positional_arg(args, 1)?;
+                    let items = expect_array(arr)?;
+                    let mut out = Vec::new();
+                    for item in items {
+                        let mapped = eval_with_current(func, env, item)?;
+                        out.extend(expect_array(mapped)?);
+                    }
+                    Ok(Value::Array(out))
+                }
+                "array.contains" => {
+                    let arr = eval_value_expr_with_env(positional_arg(args, 0)?, env)?;
+                    let needle = eval_value_expr_with_env(positional_arg(args, 1)?, env)?;
+                    let items = expect_array(arr)?;
+                    Ok(Value::Bool(items.into_iter().any(|item| item == needle)))
+                }
+                _ => Err(format!("unsupported expression call: {name}")),
+            }
+        }
         _ => Err("unsupported expression form".to_string()),
+    }
+}
+
+fn eval_with_current(expr: &Expr, env: &BTreeMap<String, Value>, current: Value) -> Result<Value, String> {
+    let mut scoped = env.clone();
+    scoped.insert("_".to_string(), current);
+    eval_value_expr_with_env(expr, &scoped)
+}
+
+fn expect_array(value: Value) -> Result<Vec<Value>, String> {
+    match value {
+        Value::Array(items) => Ok(items),
+        _ => Err("expected array".to_string()),
     }
 }
 
@@ -536,10 +654,30 @@ fn positional_arg(args: &[CallArg], index: usize) -> Result<&Expr, String> {
         })
 }
 
+fn named_arg<'a>(args: &'a [CallArg], name: &str) -> Result<&'a Expr, String> {
+    args.iter()
+        .find_map(|arg| match arg {
+            CallArg::Named {
+                name: arg_name,
+                value,
+                ..
+            } if arg_name == name => Some(value),
+            _ => None,
+        })
+        .ok_or_else(|| format!("missing named arg: {name}"))
+}
+
 fn expect_string(expr: &Expr) -> Result<String, String> {
     match expr {
         Expr::String { value, .. } => Ok(value.clone()),
         _ => Err("expected string literal".to_string()),
+    }
+}
+
+fn expect_i64_literal(expr: &Expr) -> Result<i64, String> {
+    match expr {
+        Expr::Number { value, .. } => Ok(*value),
+        _ => Err("expected i64 literal".to_string()),
     }
 }
 
