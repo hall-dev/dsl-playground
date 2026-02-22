@@ -1,6 +1,6 @@
 use dsl_syntax::{parse_program, CallArg, Expr, Program, Stmt};
 use serde_json::{Map, Value as JsonValue};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -41,6 +41,11 @@ pub struct Outputs {
     pub explain: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct RuntimeState {
+    kv_stores: HashMap<String, HashMap<String, Value>>,
+}
+
 #[derive(Debug, Clone)]
 enum Binding {
     Stream(Stream),
@@ -56,6 +61,14 @@ enum Stage {
         by_key: Expr,
         within_ms: i64,
         limit: i64,
+    },
+    KvLoad { store: String },
+    LookupKv { store: String, key: Expr },
+    LookupBatchKv {
+        store: String,
+        key: Expr,
+        batch_size: i64,
+        within_ms: i64,
     },
     RbacEvaluate {
         principal_bindings: String,
@@ -84,18 +97,19 @@ pub fn run(program: &str, fixtures: JsonValue) -> Result<Outputs, String> {
     let program = compile(program)?;
     let fixture_map = parse_fixtures(fixtures)?;
     let mut env: BTreeMap<String, Binding> = BTreeMap::new();
+    let mut state = RuntimeState::default();
     let mut outputs = Outputs::default();
 
     for stmt in &program.statements {
         match stmt {
             Stmt::Binding { name, expr, .. } => {
                 outputs.explain.push(format!("binding {name}"));
-                let val = eval_expr(expr, &env, &fixture_map, &mut outputs)?;
+                let val = eval_expr(expr, &env, &fixture_map, &mut state, &mut outputs)?;
                 env.insert(name.clone(), val);
             }
             Stmt::Pipeline { expr, .. } => {
                 outputs.explain.push("pipeline".to_string());
-                let _ = expect_stream(eval_expr(expr, &env, &fixture_map, &mut outputs)?)?;
+                let _ = expect_stream(eval_expr(expr, &env, &fixture_map, &mut state, &mut outputs)?)?;
             }
         }
     }
@@ -107,14 +121,15 @@ fn eval_expr(
     expr: &Expr,
     env: &BTreeMap<String, Binding>,
     fixtures: &BTreeMap<String, Vec<JsonValue>>,
+    state: &mut RuntimeState,
     outputs: &mut Outputs,
 ) -> Result<Binding, String> {
     match expr {
         Expr::Pipeline { input, stages, .. } => {
-            let mut stream = expect_stream(eval_expr(input, env, fixtures, outputs)?)?;
+            let mut stream = expect_stream(eval_expr(input, env, fixtures, state, outputs)?)?;
             for stage_expr in stages {
-                let stage = expect_stage(eval_expr(stage_expr, env, fixtures, outputs)?)?;
-                stream = apply_stage(&stage, stream, fixtures, outputs)?;
+                let stage = expect_stage(eval_expr(stage_expr, env, fixtures, state, outputs)?)?;
+                stream = apply_stage(&stage, stream, fixtures, state, outputs)?;
             }
             Ok(Binding::Stream(stream))
         }
@@ -151,6 +166,19 @@ fn eval_expr(
                     within_ms: expect_i64_literal(named_arg(args, "within_ms")?)?,
                     limit: expect_i64_literal(named_arg(args, "limit")?)?,
                 })),
+                "kv.load" => Ok(Binding::Stage(Stage::KvLoad {
+                    store: expect_string(named_arg(args, "store")?)?,
+                })),
+                "lookup.kv" => Ok(Binding::Stage(Stage::LookupKv {
+                    store: expect_string(named_arg(args, "store")?)?,
+                    key: named_arg(args, "key")?.clone(),
+                })),
+                "lookup.batch_kv" => Ok(Binding::Stage(Stage::LookupBatchKv {
+                    store: expect_string(named_arg(args, "store")?)?,
+                    key: named_arg(args, "key")?.clone(),
+                    batch_size: expect_i64_literal(named_arg(args, "batch_size")?)?,
+                    within_ms: expect_i64_literal(named_arg(args, "within_ms")?)?,
+                })),
                 "rbac.evaluate" => Ok(Binding::Stage(Stage::RbacEvaluate {
                     principal_bindings: expect_string(named_arg(args, "principal_bindings")?)?,
                     role_perms: expect_string(named_arg(args, "role_perms")?)?,
@@ -179,11 +207,11 @@ fn eval_expr(
             .cloned()
             .ok_or_else(|| format!("unknown ident {name}")),
         Expr::Compose { left, right, .. } => Ok(Binding::Stage(Stage::Compose(vec![
-            expect_stage(eval_expr(left, env, fixtures, outputs)?)?,
-            expect_stage(eval_expr(right, env, fixtures, outputs)?)?,
+            expect_stage(eval_expr(left, env, fixtures, state, outputs)?)?,
+            expect_stage(eval_expr(right, env, fixtures, state, outputs)?)?,
         ]))),
         Expr::Inverse { expr, .. } => Ok(Binding::Stage(invert_stage(expect_stage(eval_expr(
-            expr, env, fixtures, outputs,
+            expr, env, fixtures, state, outputs,
         )?)?)?)),
         _ => Err("unsupported expression for stream/stage evaluation".to_string()),
     }
@@ -193,6 +221,7 @@ fn apply_stage(
     stage: &Stage,
     stream: Stream,
     fixtures: &BTreeMap<String, Vec<JsonValue>>,
+    state: &mut RuntimeState,
     outputs: &mut Outputs,
 ) -> Result<Stream, String> {
     match stage {
@@ -265,6 +294,72 @@ fn apply_stage(
                 .collect();
             Ok(Stream::new(out))
         }
+        Stage::KvLoad { store } => {
+            outputs.explain.push(format!("  [sink] kv.load({store})"));
+            let kv = state.kv_stores.entry(store.clone()).or_default();
+            for item in stream {
+                let record = expect_record(item, "kv.load input must be Record")?;
+                let key = expect_string_value(
+                    record.get("key").cloned().unwrap_or(Value::Null),
+                    "kv.load input.key must be String",
+                )?;
+                let value = record
+                    .get("value")
+                    .cloned()
+                    .ok_or_else(|| "kv.load input must contain field 'value'".to_string())?;
+                kv.insert(key, value);
+            }
+            Ok(Stream::new(vec![Value::Unit]))
+        }
+        Stage::LookupKv { store, key } => {
+            outputs.explain.push(format!("  [pure] lookup.kv({store})"));
+            let kv = state.kv_stores.get(store);
+            let mut out = Vec::new();
+            for item in stream {
+                let lookup_key = expect_string_value(
+                    eval_value_expr(key, Some(&item))?,
+                    "lookup.kv key must evaluate to String",
+                )?;
+                let right = kv
+                    .and_then(|s| s.get(&lookup_key).cloned())
+                    .unwrap_or(Value::Null);
+                out.push(Value::Record(BTreeMap::from([
+                    ("left".to_string(), item),
+                    ("right".to_string(), right),
+                ])));
+            }
+            Ok(Stream::new(out))
+        }
+        Stage::LookupBatchKv {
+            store,
+            key,
+            batch_size,
+            within_ms,
+        } => {
+            if *batch_size < 0 || *within_ms < 0 {
+                return Err("lookup.batch_kv batch_size/within_ms must be >= 0".to_string());
+            }
+            outputs
+                .explain
+                .push(format!("  [pure] lookup.batch_kv({store})"));
+            let kv = state.kv_stores.get(store);
+            let items: Vec<Value> = stream.into_iter().collect();
+            let mut out = Vec::new();
+            for item in items {
+                let lookup_key = expect_string_value(
+                    eval_value_expr(key, Some(&item))?,
+                    "lookup.batch_kv key must evaluate to String",
+                )?;
+                let right = kv
+                    .and_then(|s| s.get(&lookup_key).cloned())
+                    .unwrap_or(Value::Null);
+                out.push(Value::Record(BTreeMap::from([
+                    ("left".to_string(), item),
+                    ("right".to_string(), right),
+                ])));
+            }
+            Ok(Stream::new(out))
+        }
         Stage::RbacEvaluate {
             principal_bindings,
             role_perms,
@@ -335,7 +430,7 @@ fn apply_stage(
         Stage::Compose(stages) => {
             let mut current = stream;
             for part in stages {
-                current = apply_stage(part, current, fixtures, outputs)?;
+                current = apply_stage(part, current, fixtures, state, outputs)?;
             }
             Ok(current)
         }
@@ -583,6 +678,14 @@ fn eval_value_expr_with_env(expr: &Expr, env: &BTreeMap<String, Value>) -> Resul
                     let items = expect_array(arr)?;
                     Ok(Value::Bool(items.into_iter().any(|item| item == needle)))
                 }
+                "default" => {
+                    let value = eval_value_expr_with_env(positional_arg(args, 0)?, env)?;
+                    if matches!(value, Value::Null) {
+                        eval_value_expr_with_env(positional_arg(args, 1)?, env)
+                    } else {
+                        Ok(value)
+                    }
+                }
                 _ => Err(format!("unsupported expression call: {name}")),
             }
         }
@@ -604,6 +707,20 @@ fn expect_array(value: Value) -> Result<Vec<Value>, String> {
     match value {
         Value::Array(items) => Ok(items),
         _ => Err("expected array".to_string()),
+    }
+}
+
+fn expect_record(value: Value, err: &str) -> Result<BTreeMap<String, Value>, String> {
+    match value {
+        Value::Record(record) => Ok(record),
+        _ => Err(err.to_string()),
+    }
+}
+
+fn expect_string_value(value: Value, err: &str) -> Result<String, String> {
+    match value {
+        Value::String(s) => Ok(s),
+        _ => Err(err.to_string()),
     }
 }
 
