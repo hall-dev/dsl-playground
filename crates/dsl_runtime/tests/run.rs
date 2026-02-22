@@ -38,3 +38,17 @@ input.json("ss") |> json |> utf8 |> ~utf8 |> ui.table("rt");
     let out = run(program, json!({"ss": ["hi", "ok"]})).expect("program C should run");
     assert_eq!(out.tables.get("rt"), Some(&vec![json!("hi"), json!("ok")]));
 }
+
+#[test]
+fn ui_table_accumulates_rows_across_pipelines() {
+    let program = r#"
+input.json("a") |> json |> ui.table("out");
+input.json("b") |> json |> ui.table("out");
+"#;
+
+    let out = run(program, json!({"a": [{"x": 1}], "b": [2, 3]})).expect("program should run");
+    assert_eq!(
+        out.tables.get("out"),
+        Some(&vec![json!({"x": 1}), json!(2), json!(3)])
+    );
+}
