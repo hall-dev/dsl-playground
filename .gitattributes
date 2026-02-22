@@ -1,0 +1,13 @@
+# Treat .dsl files as Elixir for syntax highlighting on GitHub
+*.dsl linguist-language=Elixir
+*.dsl linguist-detectable=true
+
+# Useful diff hints for common file types
+*.md  text eol=lf
+*.rs  text eol=lf
+*.ts  text eol=lf
+*.tsx text eol=lf
+*.json text eol=lf
+
+# Optional: make diffs nicer
+*.json diff=json
