@@ -203,3 +203,133 @@ requests
         ])
     );
 }
+
+#[test]
+fn kv_load_and_lookup_supports_single_and_batch_lookup() {
+    let program = r#"
+input.json("users")
+  |> json
+  |> kv.load(store="users");
+
+input.json("events")
+  |> json
+  |> lookup.kv(store="users", key=_.user_id)
+  |> ui.table("single");
+
+input.json("events")
+  |> json
+  |> lookup.batch_kv(store="users", key=_.user_id, batch_size=100, within_ms=10)
+  |> ui.table("batch");
+"#;
+
+    let fixtures = json!({
+        "users": [
+            {"key": "u1", "value": {"name": "Ada"}},
+            {"key": "u2", "value": {"name": "Lin"}}
+        ],
+        "events": [
+            {"user_id": "u1", "action": "login"},
+            {"user_id": "u9", "action": "logout"}
+        ]
+    });
+
+    let out = run(program, fixtures).expect("program should run");
+    let expected = vec![
+        json!({
+            "left": {"user_id": "u1", "action": "login"},
+            "right": {"name": "Ada"}
+        }),
+        json!({
+            "left": {"user_id": "u9", "action": "logout"},
+            "right": null
+        }),
+    ];
+
+    assert_eq!(out.tables.get("single"), Some(&expected));
+    assert_eq!(out.tables.get("batch"), Some(&expected));
+}
+
+#[test]
+fn array_helpers_and_default_builtin_work_in_map_stage() {
+    let program = r#"
+input.json("rows")
+  |> json
+  |> map({
+    mapped: array.map(_.nums, _ + 1),
+    filtered: array.filter(_.nums, _ > 1),
+    any_big: array.any(_.nums, _ > 2),
+    flattened: array.flat_map(_.nums, [_, _]),
+    contains_two: array.contains(_.nums, 2),
+    fallback_name: default(_.name, "n/a")
+  })
+  |> ui.table("out");
+"#;
+
+    let fixtures = json!({
+        "rows": [
+            {"nums": [1, 2], "name": null},
+            {"nums": [3], "name": "ok"}
+        ]
+    });
+
+    let out = run(program, fixtures).expect("program should run");
+    assert_eq!(
+        out.tables.get("out"),
+        Some(&vec![
+            json!({
+                "mapped": [2, 3],
+                "filtered": [2],
+                "any_big": false,
+                "flattened": [1, 1, 2, 2],
+                "contains_two": true,
+                "fallback_name": "n/a"
+            }),
+            json!({
+                "mapped": [4],
+                "filtered": [3],
+                "any_big": true,
+                "flattened": [3, 3],
+                "contains_two": false,
+                "fallback_name": "ok"
+            })
+        ])
+    );
+}
+
+#[test]
+fn group_collect_all_groups_entire_finite_stream() {
+    let program = r#"
+input.json("rows")
+  |> json
+  |> group.collect_all(by_key=_.team, within_ms=1000, limit=10)
+  |> ui.table("out");
+"#;
+
+    let fixtures = json!({
+        "rows": [
+            {"team": "a", "id": 1},
+            {"team": "b", "id": 2},
+            {"team": "a", "id": 3}
+        ]
+    });
+
+    let out = run(program, fixtures).expect("program should run");
+    assert_eq!(
+        out.tables.get("out"),
+        Some(&vec![
+            json!({
+                "key": "a",
+                "items": [
+                    {"team": "a", "id": 1},
+                    {"team": "a", "id": 3}
+                ]
+            }),
+            json!({
+                "key": "b",
+                "items": [
+                    {"team": "b", "id": 2}
+                ]
+            })
+        ])
+    );
+}

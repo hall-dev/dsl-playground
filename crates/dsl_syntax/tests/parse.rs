@@ -75,3 +75,24 @@ input.json("xs")
     assert!(got.contains("array"));
     assert!(got.contains("contains"));
 }
+
+#[test]
+fn parses_kv_lookup_stages() {
+    let src = r#"
+input.json("rows")
+  |> json
+  |> kv.load(store="users");
+
+input.json("events")
+  |> json
+  |> lookup.kv(store="users", key=_.id)
+  |> lookup.batch_kv(store="users", key=_.id, batch_size=100, within_ms=50)
+  |> ui.table("out");
+"#;
+    let got = parse_debug(src);
+    assert!(got.contains("kv"));
+    assert!(got.contains("lookup"));
+    assert!(got.contains("batch_kv"));
+    assert!(got.contains("Named"));
+    assert!(got.contains("within_ms"));
+}
