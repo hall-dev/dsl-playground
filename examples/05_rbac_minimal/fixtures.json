@@ -1,0 +1,19 @@
+{
+  "ancestors": [
+    {"key":"bucket/b1","value":["bucket/b1","project/p1","org/o1"]},
+    {"key":"bucket/b2","value":["bucket/b2","project/p2","org/o1"]}
+  ],
+  "role_perms": [
+    {"key":"roles/storage.objectViewer","value":["storage.objects.get","storage.objects.list"]},
+    {"key":"roles/storage.objectAdmin","value":["storage.objects.*"]}
+  ],
+  "bindings": [
+    {"key":"user/alice","value":[{"principal_id":"user/alice","scope_id":"project/p1","role_id":"roles/storage.objectViewer","effect":"allow"}]},
+    {"key":"user/bob","value":[{"principal_id":"user/bob","scope_id":"org/o1","role_id":"roles/storage.objectAdmin","effect":"allow"}]}
+  ],
+  "requests": [
+    {"req_id":"r1","principal_id":"user/alice","action":"storage.objects.get","resource_id":"bucket/b1","ts":"2026-02-21T12:00:00Z"},
+    {"req_id":"r2","principal_id":"user/alice","action":"storage.objects.delete","resource_id":"bucket/b1","ts":"2026-02-21T12:00:01Z"},
+    {"req_id":"r3","principal_id":"user/bob","action":"storage.objects.delete","resource_id":"bucket/b2","ts":"2026-02-21T12:00:02Z"}
+  ]
+}

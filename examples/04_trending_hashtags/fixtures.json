@@ -1,0 +1,6 @@
+{
+  "events": [
+    {"tag":"#ai"}, {"tag":"#ai"}, {"tag":"#rust"},
+    {"tag":"#ai"}, {"tag":"#wasm"}, {"tag":"#rust"}
+  ]
+}
