@@ -1,0 +1,23 @@
+{
+  "principal_bindings": [
+    {"principal": "alice", "role": "reader"},
+    {"principal": "bob", "role": "writer"},
+    {"principal": "carol", "role": "admin"}
+  ],
+  "role_perms": [
+    {"role": "reader", "action": "read", "resource": "folder:engineering"},
+    {"role": "writer", "action": "write", "resource": "doc:eng-plan"},
+    {"role": "admin", "action": "delete", "resource": "folder:root"}
+  ],
+  "resource_ancestors": [
+    {"resource": "doc:eng-plan", "ancestor": "folder:engineering"},
+    {"resource": "folder:engineering", "ancestor": "folder:root"}
+  ],
+  "requests": [
+    {"principal": "alice", "action": "read", "resource": "doc:eng-plan"},
+    {"principal": "alice", "action": "write", "resource": "doc:eng-plan"},
+    {"principal": "bob", "action": "write", "resource": "doc:eng-plan"},
+    {"principal": "carol", "action": "delete", "resource": "doc:eng-plan"},
+    {"principal": "dave", "action": "read", "resource": "doc:eng-plan"}
+  ]
+}
