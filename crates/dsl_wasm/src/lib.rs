@@ -1,40 +1,66 @@
-//! Minimal stable API surface for wasm bindings.
-//! In a wasm32 build, this crate is intended to be wrapped by wasm-bindgen tooling.
+//! Minimal stable API surface for wasm-facing bindings.
 
 use serde_json::{Map, Value};
 
-fn esc(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsValue(String);
 
-pub fn compile(program: &str) -> String {
-    match dsl_runtime::compile(program) {
-        Ok(_) => "{\"ok\":true,\"diagnostics\":\"\"}".to_string(),
-        Err(e) => format!("{{\"ok\":false,\"diagnostics\":\"{}\"}}", esc(&e)),
+impl JsValue {
+    pub fn from_str(value: &str) -> Self {
+        Self(value.to_string())
+    }
+
+    pub fn as_string(&self) -> Option<String> {
+        Some(self.0.clone())
     }
 }
 
-pub fn run(program: &str, fixtures_json: &str) -> String {
-    let fixtures = match serde_json::from_str(fixtures_json) {
+fn json_string(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn object(entries: Vec<(&str, Value)>) -> Value {
+    let mut map = Map::new();
+    for (k, v) in entries {
+        map.insert(k.to_string(), v);
+    }
+    Value::Object(map)
+}
+
+pub fn compile(program: String) -> JsValue {
+    let (ok, diagnostics) = match dsl_runtime::compile(&program) {
+        Ok(_) => (true, String::new()),
+        Err(e) => (false, e),
+    };
+
+    JsValue::from_str(&json_string(&object(vec![
+        ("ok", Value::Bool(ok)),
+        ("diagnostics", Value::String(diagnostics)),
+    ])))
+}
+
+pub fn run(program: String, fixtures_json: String) -> JsValue {
+    let fixtures = match serde_json::from_str(&fixtures_json) {
         Ok(value) => value,
         Err(e) => {
-            return format!(
-                "{{\"tables_json\":\"{{}}\",\"logs_json\":\"{{}}\",\"explain\":\"error: {}\"}}",
-                esc(&e.to_string())
-            )
+            return JsValue::from_str(&json_string(&object(vec![
+                ("tables_json", Value::String("{}".to_string())),
+                ("logs_json", Value::String("{}".to_string())),
+                (
+                    "explain",
+                    Value::String(format!("error: invalid fixtures_json: {e}")),
+                ),
+            ])));
         }
     };
 
-    match dsl_runtime::run(program, fixtures) {
+    match dsl_runtime::run(&program, fixtures) {
         Ok(out) => {
             let mut table_obj: Map = Map::new();
             for (name, rows) in out.tables {
                 table_obj.insert(name, Value::Array(rows));
             }
-            let tables_json =
-                serde_json::to_string(&Value::Object(table_obj)).unwrap_or_else(|_| "{}".to_string());
+            let tables_json = json_string(&Value::Object(table_obj));
 
             let mut log_obj: Map = Map::new();
             for (name, rows) in out.logs {
@@ -43,31 +69,74 @@ pub fn run(program: &str, fixtures_json: &str) -> String {
                     Value::Array(rows.into_iter().map(Value::String).collect()),
                 );
             }
-            let logs_json =
-                serde_json::to_string(&Value::Object(log_obj)).unwrap_or_else(|_| "{}".to_string());
+            let logs_json = json_string(&Value::Object(log_obj));
 
-            let explain = out.explain.join("\n");
-            format!(
-                "{{\"tables_json\":\"{}\",\"logs_json\":\"{}\",\"explain\":\"{}\"}}",
-                esc(&tables_json),
-                esc(&logs_json),
-                esc(&explain)
-            )
+            JsValue::from_str(&json_string(&object(vec![
+                ("tables_json", Value::String(tables_json)),
+                ("logs_json", Value::String(logs_json)),
+                ("explain", Value::String(out.explain.join("\n"))),
+            ])))
         }
-        Err(e) => format!(
-            "{{\"tables_json\":\"{{}}\",\"logs_json\":\"{{}}\",\"explain\":\"error: {}\"}}",
-            esc(&e)
-        ),
+        Err(e) => JsValue::from_str(&json_string(&object(vec![
+            ("tables_json", Value::String("{}".to_string())),
+            ("logs_json", Value::String("{}".to_string())),
+            ("explain", Value::String(format!("error: {e}"))),
+        ]))),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+
+    fn get_field<'a>(value: &'a Value, key: &str) -> &'a Value {
+        match value {
+            Value::Object(map) => map.get(key).expect("field should exist"),
+            _ => panic!("expected object"),
+        }
+    }
+
     #[test]
-    fn compile_shape() {
-        assert!(
-            super::compile("x := 1;").contains("\"ok\":false")
-                || super::compile("x := input.json(\"x\") |> json;").contains("\"ok\":true")
-        );
+    fn compile_returns_diagnostics_on_parse_error() {
+        let out = super::compile("x :=".to_string());
+        let text = out
+            .as_string()
+            .expect("compile should return string JsValue");
+        let body: Value = serde_json::from_str(&text).expect("valid json object");
+
+        assert_eq!(get_field(&body, "ok"), &Value::Bool(false));
+        let diagnostics = match get_field(&body, "diagnostics") {
+            Value::String(v) => v,
+            _ => panic!("diagnostics should be string"),
+        };
+        assert!(!diagnostics.is_empty());
+    }
+
+    #[test]
+    fn run_returns_output_json_strings() {
+        let program = r#"
+xs := input.json("xs") |> json;
+xs |> map(_ + 1) |> ui.table("out");
+"#;
+
+        let out = super::run(program.to_string(), "{\"xs\": [1, 2]}".to_string());
+        let text = out.as_string().expect("run should return string JsValue");
+        let body: Value = serde_json::from_str(&text).expect("valid json object");
+
+        let tables_text = match get_field(&body, "tables_json") {
+            Value::String(v) => v,
+            _ => panic!("tables_json should be string"),
+        };
+        let tables: Value =
+            serde_json::from_str(tables_text).expect("tables_json should be valid json");
+        assert_eq!(get_field(&tables, "out"), &serde_json::json!([2, 3]));
+        match get_field(&body, "logs_json") {
+            Value::String(_) => {}
+            _ => panic!("logs_json should be string"),
+        }
+        match get_field(&body, "explain") {
+            Value::String(_) => {}
+            _ => panic!("explain should be string"),
+        }
     }
 }

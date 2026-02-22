@@ -8,5 +8,4 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 dsl_runtime = { path = "../dsl_runtime" }
-
 serde_json = { path = "../serde_json" }
