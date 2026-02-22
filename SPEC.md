@@ -42,6 +42,8 @@ v0 runtime uses dynamic values:
 - `map(expr)` : T -> U, evaluates expr with `_` bound to current value.
 - `filter(expr)` : T -> T, keeps element if expr evaluates to true.
 - `flat_map(expr)` : T -> U, expr must evaluate to Array[U], emits each element.
+- `rank.topk(k, by, order)` : selects top K by `by` key (`I64`/`String`), `order` in {`"asc"`, `"desc"`}.
+- `rank.kmerge_arrays(by, order, limit)` : input item must be `Array[Array[Value]]` of pre-sorted lists; merges lists by key and emits up to `limit`.
 
 ### Reversible atoms
 - `json` : Bytes <-> Record/Array/Scalar JSON (dynamic)
