@@ -23,8 +23,10 @@ function parseJson<T>(text: string, fallback: T): T {
 }
 
 export async function loadWasmApi(): Promise<WasmApi> {
+  const wasmModuleUrl = new URL('/wasm/dsl_wasm.js', window.location.origin).href;
+
   try {
-    const module = await import(/* @vite-ignore */ '/wasm/dsl_wasm.js');
+    const module = await import(/* @vite-ignore */ wasmModuleUrl);
     if (module.default) {
       await module.default();
     }
@@ -55,7 +57,7 @@ export async function loadWasmApi(): Promise<WasmApi> {
       run: () => ({
         tables_json: '{}',
         logs_json: '{}',
-        explain: `WASM package not built. Could not load /wasm/dsl_wasm.js (${lastError})`,
+        explain: `WASM package not built. Could not load ${wasmModuleUrl} (${lastError})`,
       }),
     };
   }
