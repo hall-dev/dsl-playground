@@ -6,8 +6,8 @@ use serde_json::{Map, Value};
 pub struct JsValue(String);
 
 impl JsValue {
-    pub fn from_str(value: &str) -> Self {
-        Self(value.to_string())
+    pub fn from_json_string(value: String) -> Self {
+        Self(value)
     }
 
     pub fn as_string(&self) -> Option<String> {
@@ -33,7 +33,7 @@ pub fn compile(program: String) -> JsValue {
         Err(e) => (false, e),
     };
 
-    JsValue::from_str(&json_string(&object(vec![
+    JsValue::from_json_string(json_string(&object(vec![
         ("ok", Value::Bool(ok)),
         ("diagnostics", Value::String(diagnostics)),
     ])))
@@ -43,7 +43,7 @@ pub fn run(program: String, fixtures_json: String) -> JsValue {
     let fixtures = match serde_json::from_str(&fixtures_json) {
         Ok(value) => value,
         Err(e) => {
-            return JsValue::from_str(&json_string(&object(vec![
+            return JsValue::from_json_string(json_string(&object(vec![
                 ("tables_json", Value::String("{}".to_string())),
                 ("logs_json", Value::String("{}".to_string())),
                 (
@@ -71,13 +71,13 @@ pub fn run(program: String, fixtures_json: String) -> JsValue {
             }
             let logs_json = json_string(&Value::Object(log_obj));
 
-            JsValue::from_str(&json_string(&object(vec![
+            JsValue::from_json_string(json_string(&object(vec![
                 ("tables_json", Value::String(tables_json)),
                 ("logs_json", Value::String(logs_json)),
                 ("explain", Value::String(out.explain.join("\n"))),
             ])))
         }
-        Err(e) => JsValue::from_str(&json_string(&object(vec![
+        Err(e) => JsValue::from_json_string(json_string(&object(vec![
             ("tables_json", Value::String("{}".to_string())),
             ("logs_json", Value::String("{}".to_string())),
             ("explain", Value::String(format!("error: {e}"))),

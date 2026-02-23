@@ -125,6 +125,19 @@ enum SortKey {
     String(String),
 }
 
+#[derive(Debug, Clone)]
+struct GroupTopNItem {
+    source_index: usize,
+    order_key: SortKey,
+    value: Value,
+}
+
+#[derive(Debug, Clone)]
+struct GroupTopNBucket {
+    key: Value,
+    items: Vec<GroupTopNItem>,
+}
+
 pub fn compile(program: &str) -> Result<Program, String> {
     parse_program(program).map_err(|e| e.to_string())
 }
@@ -493,7 +506,7 @@ fn apply_stage(
                 .explain
                 .push("  [pure] group.topn_items".to_string());
 
-            let mut groups: Vec<(Value, Vec<(usize, SortKey, Value)>)> = Vec::new();
+            let mut groups: Vec<GroupTopNBucket> = Vec::new();
             for (idx, item) in stream.into_iter().enumerate() {
                 let key = eval_value_expr(by_key, Some(&item))?;
                 expect_group_key(
@@ -505,31 +518,42 @@ fn apply_stage(
                     "group.topn_items order_by must evaluate to I64 or String",
                 )?;
 
-                if let Some((_, items)) = groups
-                    .iter_mut()
-                    .find(|(existing_key, _)| *existing_key == key)
-                {
-                    items.push((idx, order_key, item));
+                if let Some(bucket) = groups.iter_mut().find(|bucket| bucket.key == key) {
+                    bucket.items.push(GroupTopNItem {
+                        source_index: idx,
+                        order_key,
+                        value: item,
+                    });
                 } else {
-                    groups.push((key, vec![(idx, order_key, item)]));
+                    groups.push(GroupTopNBucket {
+                        key,
+                        items: vec![GroupTopNItem {
+                            source_index: idx,
+                            order_key,
+                            value: item,
+                        }],
+                    });
                 }
             }
 
             let max_items = *n as usize;
             let out = groups
                 .into_iter()
-                .map(|(key, mut items)| {
-                    items.sort_by(|(idx_a, key_a, _), (idx_b, key_b, _)| {
-                        compare_keys(key_a, key_b, *order).then_with(|| idx_a.cmp(idx_b))
+                .map(|mut bucket| {
+                    bucket.items.sort_by(|a, b| {
+                        compare_keys(&a.order_key, &b.order_key, *order)
+                            .then_with(|| a.source_index.cmp(&b.source_index))
                     });
-                    if items.len() > max_items {
-                        items.truncate(max_items);
+                    if bucket.items.len() > max_items {
+                        bucket.items.truncate(max_items);
                     }
                     Value::Record(BTreeMap::from([
-                        ("key".to_string(), key),
+                        ("key".to_string(), bucket.key),
                         (
                             "items".to_string(),
-                            Value::Array(items.into_iter().map(|(_, _, item)| item).collect()),
+                            Value::Array(
+                                bucket.items.into_iter().map(|entry| entry.value).collect(),
+                            ),
                         ),
                     ]))
                 })
@@ -1347,7 +1371,7 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     }
 
     let bytes = s.as_bytes();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err("invalid base64 length".to_string());
     }
 
