@@ -23,43 +23,40 @@ function parseJson<T>(text: string, fallback: T): T {
 }
 
 export async function loadWasmApi(): Promise<WasmApi> {
-  let lastError = 'unknown error';
-
-  for (const wasmModulePath of ['/wasm/dsl_wasm.js', '../../crates/dsl_wasm/pkg/dsl_wasm.js']) {
-    try {
-      const module = await import(/* @vite-ignore */ wasmModulePath);
-      if (module.default) {
-        await module.default();
-      }
-
-      return {
-        compile: (program: string) =>
-          parseJson<CompileOutput>(module.compile(program), {
-            ok: false,
-            diagnostics: 'failed to parse compile output',
-          }),
-        run: (program: string, fixtures: string) =>
-          parseJson<RunOutput>(module.run(program, fixtures), {
-            tables_json: '{}',
-            logs_json: '{}',
-            explain: 'failed to parse run output',
-          }),
-      };
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
+  try {
+    const module = await import(/* @vite-ignore */ '/wasm/dsl_wasm.js');
+    if (module.default) {
+      await module.default();
     }
-  }
 
-  return {
-    compile: () => ({
-      ok: false,
-      diagnostics:
-        'WASM package not built. Run `wasm-pack build crates/dsl_wasm --target web --out-dir pkg` from repo root.',
-    }),
-    run: () => ({
-      tables_json: '{}',
-      logs_json: '{}',
-      explain: `WASM package not built. Last load error: ${lastError}`,
-    }),
-  };
+    return {
+      compile: (program: string) =>
+        parseJson<CompileOutput>(module.compile(program), {
+          ok: false,
+          diagnostics: 'failed to parse compile output',
+        }),
+      run: (program: string, fixtures: string) =>
+        parseJson<RunOutput>(module.run(program, fixtures), {
+          tables_json: '{}',
+          logs_json: '{}',
+          explain: 'failed to parse run output',
+        }),
+    };
+  } catch (error) {
+    const lastError = error instanceof Error ? error.message : String(error);
+
+    return {
+      compile: () => ({
+        ok: false,
+        diagnostics:
+          'WASM package not built. Run `npm run dev` (or `npm run build`) in `web/` so `scripts/prepare-wasm.mjs` can prepare `/public/wasm`.\n' +
+          'If wasm-pack is not installed, install it and run `wasm-pack build crates/dsl_wasm --target web --out-dir pkg` from repo root.',
+      }),
+      run: () => ({
+        tables_json: '{}',
+        logs_json: '{}',
+        explain: `WASM package not built. Could not load /wasm/dsl_wasm.js (${lastError})`,
+      }),
+    };
+  }
 }
