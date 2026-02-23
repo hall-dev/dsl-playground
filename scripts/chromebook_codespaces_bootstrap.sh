@@ -26,7 +26,7 @@ if ! command -v wasm-pack >/dev/null 2>&1; then
 fi
 
 # Build WASM package when the crate is configured for wasm-bindgen.
-if rg -q '^wasm-bindgen\s*=' crates/dsl_wasm/Cargo.toml; then
+if grep -Eq '^wasm-bindgen\s*=' crates/dsl_wasm/Cargo.toml; then
   wasm-pack build crates/dsl_wasm --target web --out-dir crates/dsl_wasm/pkg
 else
   echo "warning: crates/dsl_wasm/Cargo.toml does not declare wasm-bindgen; skipping wasm-pack build." >&2
